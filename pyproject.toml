@@ -1,0 +1,32 @@
+[project]
+name = "brainflex-server"
+version = "0.1.0"
+description = "Server for orchestrating brain FL experiments"
+requires-python = ">=3.11, <3.12"
+dependencies = [
+    "declearn>=2.6.1", # needs pin to avoid version conflict
+    "fedbiomed[researcher]==6.4.1", # same version as the researcher image
+    "numpy",
+    "setuptools<81", # for tensorboard
+]
+
+[dependency-groups]
+dev = [{ include-group = "test" }, "prek"]
+test = [
+    "pandas",
+    "pytest-cov",
+    "pytest-mock",
+    "pytest>=6.0.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.codespell]
+skip = '.git,.github,pyproject.toml,uv.lock'
+
+[tool.pytest.ini_options]
+addopts = "--color=yes -ra -q -vv"
+testpaths = ["tests/"]
+minversion = "6.0"
+xfail_strict = true

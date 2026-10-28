@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# container run-time files (VPN keys, researcher configuration and results)
+vpnserver_config/**
+!vpnserver_config/**/
+!vpnserver_config/**/.gitkeep
+!vpnserver_config/config.env.sample
+researcher_vpn_config/**
+!researcher_vpn_config/**/
+!researcher_vpn_config/**/.gitkeep
+fbm-researcher/**
+!fbm-researcher/**/
+!fbm-researcher/**/.gitkeep

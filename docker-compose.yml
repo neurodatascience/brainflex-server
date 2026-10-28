@@ -1,0 +1,91 @@
+#
+# Fed-BioMed researcher and WireGuard VPN server for the brainflex experiment
+#
+# Adapted from Fed-BioMed (Apache-2.0):
+# https://github.com/fedbiomed/fedbiomed/blob/v6.4.1/envs/vpn/docker/docker-compose.yml
+#
+
+services:
+  #
+  # VPN server
+  vpn-server:
+    container_name: brainflex-vpn-server-${FBM_CONTAINER_INSTANCE_ID:-default}
+    hostname: brainflex-vpn-server-${FBM_CONTAINER_INSTANCE_ID:-default}
+    build:
+      context: https://github.com/neurodatascience/brainflex.git#main:docker/vpn-server
+      additional_contexts:
+        vpn-client: service:researcher-vpn # base image
+    image: brainflex/vpn-server:local
+    pull_policy: build
+    cap_add:
+      - net_admin # needed to handle wireguard interface
+      - sys_module # needed to remove wireguard kernel module
+    devices:
+      - /dev/net/tun # needed to handle wireguard interface
+    sysctls:
+      - net.ipv4.ip_forward=1 # relay traffic between VPN peers
+    volumes:
+      - ./vpnserver_config:/config # contains VPN configurations
+    ports:
+      - 51820:51820/udp # wireguard server
+    # separate network: clients on the same docker network cannot reach the
+    # server through the host's published port
+    networks:
+      - vpn-server
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "wg0", "up"]
+      interval: 10s
+      start_period: 10s
+    restart: unless-stopped
+  #
+  # VPN client for the researcher
+  researcher-vpn:
+    container_name: brainflex-researcher-vpn-${FBM_CONTAINER_INSTANCE_ID:-default}
+    hostname: brainflex-researcher-${FBM_CONTAINER_INSTANCE_ID:-default}
+    build:
+      context: https://github.com/neurodatascience/brainflex.git#main:docker/vpn-client
+    image: brainflex/vpn-client:local
+    pull_policy: build
+    cap_add:
+      - net_admin # needed to handle wireguard interface
+      - sys_module # needed to remove wireguard kernel module
+    devices:
+      - /dev/net/tun # needed to handle wireguard interface
+    volumes:
+      - ./researcher_vpn_config:/config # contains VPN configurations
+    # the researcher container uses this container's network
+    ports:
+      - "127.0.0.1:8888:8888" # jupyter notebook
+      - "127.0.0.1:6006:6007" # tensorboard via socat proxy
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "wg0", "up"]
+      interval: 10s
+      start_period: 10s
+    restart: unless-stopped
+  #
+  # Fed-BioMed researcher
+  researcher:
+    container_name: brainflex-researcher-${FBM_CONTAINER_INSTANCE_ID:-default}
+    image: fedbiomed/researcher:${FBM_CONTAINER_VERSION_TAG:-unknown}
+    network_mode: service:researcher-vpn
+    depends_on:
+      researcher-vpn:
+        condition: service_healthy
+        restart: true
+    # start as root so that the entrypoint can remap the `fedbiomed` user to
+    # CONTAINER_UID/CONTAINER_GID, it then drops privileges to `fedbiomed`
+    user: root
+    environment:
+      - CONTAINER_UID
+      - CONTAINER_GID
+      - FBM_RESEARCHER_COMPONENT_ROOT=/fbm-researcher
+    volumes:
+      - ./fbm-researcher:/fbm-researcher # contains fedbiomed component configuration and data
+      # brainflex training plans and experiment script
+      - ./training_plans:/brainflex-server/training_plans:ro
+      - ./scripts:/brainflex-server/scripts:ro
+    restart: unless-stopped
+
+networks:
+  vpn-server:
+    name: brainflex_vpn-server_${FBM_CONTAINER_INSTANCE_ID:-default}

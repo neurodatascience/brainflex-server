@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#
+# check that the docker containers are running and can communicate through the VPN
+#
+# Adapted from Fed-BioMed (Apache-2.0):
+# https://github.com/fedbiomed/fedbiomed/blob/develop/scripts/fedbiomed_vpn
+#
+
+# main variables
+# --------------
+ALL_CONTAINERS=( vpn-server researcher-vpn researcher )
+VPN_SERVER_IP=10.220.0.1
+
+usage() {
+    #
+    # print usage
+    #
+    extra=$1
+
+    if [ -z "$extra" ]; then
+        return_code=0
+    else
+        return_code=1
+        echo "$extra"
+    fi
+    echo "\
+Usage: ${0##*/} [CONTAINER...]
+
+give information on running container(s) and check the VPN connectivity:
+- ping the VPN server from the researcher VPN container (researcher-vpn)
+
+Optional CONTAINER name(s) restrict the checks to a subset of containers.
+The CONTAINER list may contain: ${ALL_CONTAINERS[*]}
+"
+    exit $return_code
+}
+
+ONLY_CONTAINERS=()
+add_container() {
+    #
+    # deal with container names as arguments
+    #
+    container=$1
+
+    case $container in
+        vpn-server|researcher-vpn|researcher)
+            # verify if container already in the list
+            for c in "${ONLY_CONTAINERS[@]}"
+            do
+                [ "$c" = "$container" ] && return
+            done
+            ONLY_CONTAINERS+=("$container")
+            ;;
+        *)
+            usage "unknown argument: $container"
+            ;;
+    esac
+}
+
+check_ping() {
+    #
+    # ping an address from inside a container, print and record the result
+    #
+    container=$1
+    address=$2
+    description=$3
+
+    echo -n "- pinging $description ($address) from container $container -> "
+    ping=$("${DOCKER_COMPOSE[@]}" exec -T "$container" ping -n -c 3 -W 1 "$address" 2>/dev/null | cat -v)
+
+    status=$(echo "$ping" | grep seq=)
+    if [ -z "$status" ]; then
+        echo "BROKEN"
+        ERROR=1
+    else
+        echo "OK"
+    fi
+}
+
+containers_status() {
+    echo "** Checking docker containers & VPN access:" "${ONLY_CONTAINERS[@]}"
+
+    running=$("${DOCKER_COMPOSE[@]}" ps --status running --services)
+
+    RUNNING_CONTAINERS=()
+    for i in "${ONLY_CONTAINERS[@]}"
+    do
+        if echo "$running" | grep -qx "$i"; then
+            echo "- container $i is running"
+            RUNNING_CONTAINERS+=("$i")
+        else
+            echo "- container $i is NOT running"
+        fi
+    done
+
+    # ping inside the wg vpn
+    for i in "${RUNNING_CONTAINERS[@]}"
+    do
+        case $i in
+            researcher-vpn)
+                check_ping "$i" "$VPN_SERVER_IP" "VPN server"
+                ;;
+            *)  ;; # no ping: vpn-server is the server, researcher uses the researcher-vpn container network
+        esac
+    done
+
+    if [ $ERROR -eq 1 ]; then
+        echo "** ERROR: cannot ping using VPN addresses inside some docker container(s)"
+        echo "          You must check what is going on."
+        exit 1
+    fi
+}
+
+# main
+# ----
+
+# go to the directory containing docker-compose.yml
+cd "$(dirname "$0")/.." || exit 1
+
+DOCKER_COMPOSE=( docker compose )
+ERROR=0
+
+while (($# > 0)); do
+    case $1 in
+        -h|--help|help) usage ;;
+        *) add_container "$1" ;;
+    esac
+    shift
+done
+
+# if no container on command line, use all of them
+if [ ${#ONLY_CONTAINERS[@]} -eq 0 ]; then
+    ONLY_CONTAINERS=( "${ALL_CONTAINERS[@]}" )
+fi
+
+containers_status
+
+exit 0
