@@ -35,11 +35,11 @@ The server runs with Docker Compose as three containers:
    docker compose up -d --build vpn-server
    ```
 
-4. Create the researcher peer and copy its configuration to the researcher VPN client. The first researcher gets the VPN address `10.222.0.2`, which is the default researcher address of the nodes:
+4. Create the researcher peer and copy its configuration to the researcher VPN client:
 
    ```bash
-   docker compose exec vpn-server configure_peer genconf researcher researcher1
-   cp vpnserver_config/config_peers/researcher/researcher1/config.env researcher_vpn_config/
+   docker compose exec vpn-server configure_peer genconf researcher researcher
+   cp vpnserver_config/config_peers/researcher/researcher/config.env researcher_vpn_config/
    ```
 
 5. Start the researcher:
@@ -51,7 +51,7 @@ The server runs with Docker Compose as three containers:
 6. Register the public key of the researcher on the VPN server:
 
    ```bash
-   docker compose exec vpn-server configure_peer add researcher researcher1 "$(docker compose exec -T researcher-vpn wg show wg0 public-key)"
+   docker compose exec vpn-server configure_peer add researcher researcher "$(docker compose exec -T researcher-vpn wg show wg0 public-key)"
    ```
 
 7. Check that all containers are running and that the researcher can reach the VPN server:
@@ -62,21 +62,27 @@ The server runs with Docker Compose as three containers:
 
 ### Adding a node
 
-1. Create the node peer:
+1. Set the node ID
 
    ```bash
-   docker compose exec vpn-server configure_peer genconf node <NODE_ID>
+   export NODE_ID=<NODE_ID>
    ```
 
-2. Send `vpnserver_config/config_peers/node/<NODE_ID>/config.env` to the site running the node via a secure channel.
-
-3. Once the site has started its node, register the WireGuard public key it sends back:
+2. Create the node peer:
 
    ```bash
-   docker compose exec vpn-server configure_peer add node <NODE_ID> <PUBLIC_KEY>
+   docker compose exec vpn-server configure_peer genconf node $NODE_ID
    ```
 
-4. List the peers and their keys:
+3. Send `vpnserver_config/config_peers/node/${NODE_ID}/config.env` to the site running the node via a secure channel.
+
+4. Once the site has started its node, register the WireGuard public key it sends back:
+
+   ```bash
+   docker compose exec vpn-server configure_peer add node $NODE_ID <PUBLIC_KEY>
+   ```
+
+5. List the peers and their keys:
 
    ```bash
    docker compose exec vpn-server configure_peer list

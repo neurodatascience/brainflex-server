@@ -79,6 +79,8 @@ services:
       - CONTAINER_UID
       - CONTAINER_GID
       - FBM_RESEARCHER_COMPONENT_ROOT=/fbm-researcher
+      # address of the researcher on the VPN
+      - FBM_SERVER_HOST=10.222.0.2
     volumes:
       - ./fbm-researcher:/fbm-researcher # contains fedbiomed component configuration and data
       # brainflex training plans and experiment script
