@@ -347,6 +347,11 @@ class TestGetFeatureStats:
     def test_json_serializable(self, module: ModuleType, analytics: MagicMock):
         json.dumps(module._get_feature_stats(analytics, NODE_DATA, "nb:Sex"))
 
+    def test_no_nodes(self, module: ModuleType, analytics: MagicMock):
+        with pytest.raises(ValueError, match="No node has a dataset"):
+            module._get_feature_stats(analytics, {}, "nb:Age")
+        analytics.fetch_stats.assert_not_called()
+
     def test_target_not_in_all_nodes(self, module: ModuleType, analytics: MagicMock):
         node_data = {
             "NODE_1": {"dtypes": {"nb:Age": "Float64", "nb:Sex": "Int64"}},

@@ -281,6 +281,8 @@ def _get_feature_stats(
     analytics: FederatedAnalytics, node_data: dict[str, dict], target_column: str
 ) -> tuple[list[str], list[float], list[float], dict[str, list[str]], float]:
     """Get the feature/excluded columns, some stats, and the target variable's mean."""
+    if not node_data:
+        raise ValueError("No node has a dataset for this task")
     excluded_columns: dict[str, list[str]] = defaultdict(list)
     column_sets = [set(dataset["dtypes"]) for dataset in node_data.values()]
     common_columns = set.intersection(*column_sets)
