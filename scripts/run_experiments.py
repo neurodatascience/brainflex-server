@@ -23,6 +23,7 @@ from fedbiomed.common.training_plans import BaseTrainingPlan
 from fedbiomed.researcher.datasets import FederatedDataset
 from fedbiomed.researcher.federated_workflows import Experiment, FederatedAnalytics
 from fedbiomed.researcher.federated_workflows.jobs import TrainingJob
+from fedbiomed.researcher.secagg import SecureAggregation
 
 DPATH_TRAINING_PLANS = Path(__file__).resolve().parents[1] / "training_plans"
 PREFIX_MODEL = "model"
@@ -51,6 +52,9 @@ class TaskConfig:
     # whether the model intercept is initialized to the global target mean
     with_target_mean: bool = False
     extra_model_args: dict = field(default_factory=dict)
+    # model parameters are clipped to [-x, x] before being encrypted for secure
+    # aggregation
+    secagg_clipping_range: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ TASKS = {
         target_column="nb:Age",
         test_metric=MetricTypes.MEAN_SQUARE_ERROR,
         with_target_mean=True,
+        secagg_clipping_range=100,
     ),
     "sex": TaskConfig(
         training_plan_module="tabular_classifier",
@@ -177,6 +182,15 @@ def _get_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Save node metrics as TensorBoard logs. Default: True.",
+    )
+    parser.add_argument(
+        "--secagg",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Secure aggregation of the model parameters and the feature statistics."
+            " Needs at least 2 training nodes. Default: True."
+        ),
     )
     parser.add_argument(
         "--cv",
@@ -349,7 +363,23 @@ def _move_tensorboard_logs(exp: Experiment, dpath_tensorboard: Path) -> None:
         shutil.move(dpath_node_src, dpath_node_dest)
 
 
-def _evaluate_held_out(exp: Experiment, node_data_held_out: dict[str, dict]) -> None:
+def _setup_held_out_secagg(exp: Experiment, nodes: list[str]) -> dict:
+    """Set up secure aggregation for the requests to the held-out node."""
+    secagg = SecureAggregation()
+    secagg.setup(
+        parties=nodes,
+        experiment_id=exp.id,
+        researcher_id=exp.researcher_id,
+        insecure_validation=False,
+    )
+    return secagg.train_arguments()
+
+
+def _evaluate_held_out(
+    exp: Experiment,
+    node_data_held_out: dict[str, dict],
+    secagg_arguments: dict | None = None,
+) -> None:
     """Test the current global model on all the data of the held-out node.
 
     Same as the validation-only round of ``Experiment.run_once(test_after=True)``,
@@ -378,6 +408,7 @@ def _evaluate_held_out(exp: Experiment, node_data_held_out: dict[str, dict]) -> 
         data=FederatedDataset(node_data_held_out),
         nodes_state_ids={},
         aggregator_args={},
+        secagg_arguments=secagg_arguments,
         do_training=False,
     ).execute()
 
@@ -398,6 +429,7 @@ def _run_task(
     dpath_tensorboard: Path | None = None,
     training_nodes: list[str] | None = None,
     node_data_held_out: dict[str, dict] | None = None,
+    secagg: bool = True,
 ) -> BaseTrainingPlan:
     """Train a model for a task and save it in a task-specific output directory.
 
@@ -425,6 +457,9 @@ def _run_task(
         agg_optimizer=_get_agg_optimizer(aggregator),
         round_limit=n_rounds,
         tensorboard=dpath_tensorboard is not None,
+        secagg=SecureAggregation(
+            active=secagg, clipping_range=config.secagg_clipping_range
+        ),
     )
 
     if not is_cv:
@@ -467,10 +502,16 @@ def _run_task(
     fpath_results.parent.mkdir(parents=True, exist_ok=True)
     _save_json(fpath_results, json_data)
 
+    held_out_secagg_arguments = None
+    if is_cv and secagg:
+        held_out_secagg_arguments = _setup_held_out_secagg(
+            exp, [*training_nodes, *node_data_held_out]
+        )
+
     for round_ in range(1, n_rounds + 1):
         print(f"[{task}] Round {round_}/{n_rounds}")
         if is_cv:
-            _evaluate_held_out(exp, node_data_held_out)
+            _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         exp.run_once()
         json_data["results"] = {
             # node training losses and test metrics (no public getter)
@@ -480,7 +521,7 @@ def _run_task(
         _save_json(fpath_results, json_data)
     if is_cv:
         # final global model
-        _evaluate_held_out(exp, node_data_held_out)
+        _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         json_data["results"]["node_metrics"] = exp.monitor()._metric_store
         _save_json(fpath_results, json_data)
     print(f"[{task}] Saved settings and results to {fpath_results}")
@@ -508,6 +549,7 @@ def run_experiments(
     alpha: float = DEFAULT_ALPHA,
     overwrite: bool = False,
     tensorboard: bool = True,
+    secagg: bool = True,
     cv: bool = True,
 ) -> None:
     """Train and save a global model for each task."""
@@ -522,9 +564,13 @@ def run_experiments(
             runs.append((task, None))
             continue
         node_data[task] = _get_node_data(task)
-        if len(node_data[task]) < 2:
+        # secure aggregation needs at least 2 training nodes
+        min_n_nodes = 3 if secagg else 2
+        if len(node_data[task]) < min_n_nodes:
             raise ValueError(
-                f"CV needs at least 2 nodes, but {task} has {len(node_data[task])}"
+                f"CV needs at least {min_n_nodes} nodes"
+                f"{' with secure aggregation' if secagg else ''},"
+                f" but {task} has {len(node_data[task])}"
             )
         runs.extend((task, node) for node in sorted(node_data[task]))
 
@@ -602,6 +648,7 @@ def run_experiments(
             ),
             training_nodes=training_nodes,
             node_data_held_out=node_data_held_out,
+            secagg=secagg,
         )
 
 
@@ -621,6 +668,7 @@ def main(argv: list[str] | None = None) -> None:
             alpha=args.alpha,
             overwrite=args.overwrite,
             tensorboard=args.tensorboard,
+            secagg=args.secagg,
             cv=args.cv,
         )
     except FileExistsError as e:

@@ -104,7 +104,7 @@ The output directory should be `fbm-researcher/results` inside the container.
 docker compose down
 ```
 
- To start from scratch, delete everything in `vpnserver_config/`, `researcher_vpn_config/` and `fbm-researcher/` except `.gitkeep` and `config.env.sample`.
+To start from scratch, delete everything in `vpnserver_config/`, `researcher_vpn_config/` and `fbm-researcher/` except `.gitkeep` and `config.env.sample`.
 
 ## Development
 

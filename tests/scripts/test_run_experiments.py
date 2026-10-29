@@ -110,6 +110,13 @@ def mock_evaluate_held_out(module: ModuleType, mocker: MockerFixture) -> MagicMo
 
 
 @pytest.fixture
+def mock_setup_held_out_secagg(module: ModuleType, mocker: MockerFixture) -> MagicMock:
+    return mocker.patch.object(
+        module, "_setup_held_out_secagg", return_value={"secagg_scheme": 0}
+    )
+
+
+@pytest.fixture
 def mock_get_node_data(module: ModuleType, mocker: MockerFixture) -> MagicMock:
     return mocker.patch.object(module, "_get_node_data", return_value=NODE_DATA)
 
@@ -212,7 +219,40 @@ class TestEvaluateHeldOut:
         assert training_args["test_ratio"] == 1.0
         assert training_args["test_on_global_updates"] is True
         assert training_args["test_on_local_updates"] is False
+        assert kwargs["secagg_arguments"] is None
         mock_training_job.return_value.execute.assert_called_once_with()
+
+    def test_secagg_arguments(
+        self, module: ModuleType, mock_experiment: MagicMock, mocker: MockerFixture
+    ):
+        mock_training_job = mocker.patch.object(module, "TrainingJob", autospec=True)
+        mock_experiment(training_args={})
+        exp = mock_experiment.return_value
+        exp.model_args.side_effect = None
+        secagg_arguments = {"secagg_scheme": 0}
+        module._evaluate_held_out(
+            exp, {"NODE_3": NODE_DATA["NODE_3"]}, secagg_arguments
+        )
+        kwargs = mock_training_job.call_args.kwargs
+        assert kwargs["secagg_arguments"] == secagg_arguments
+
+
+class TestSetupHeldOutSecagg:
+    def test_setup_held_out_secagg(
+        self, module: ModuleType, mock_experiment: MagicMock, mocker: MockerFixture
+    ):
+        mock_secagg = mocker.patch.object(module, "SecureAggregation")
+        exp = mock_experiment.return_value
+        nodes = ["NODE_1", "NODE_2", "NODE_3"]
+
+        secagg_arguments = module._setup_held_out_secagg(exp, nodes)
+
+        secagg = mock_secagg.return_value
+        kwargs = secagg.setup.call_args.kwargs
+        assert kwargs["parties"] == nodes
+        assert kwargs["experiment_id"] == exp.id
+        assert kwargs["researcher_id"] == exp.researcher_id
+        assert secagg_arguments == secagg.train_arguments.return_value
 
 
 class TestFilterFeatureCol:
@@ -445,6 +485,9 @@ class TestRunTask:
             "fedprox_mu": None,
         }
         assert mock_experiment.call_args.kwargs["agg_optimizer"] is not None
+        secagg = mock_experiment.call_args.kwargs["secagg"]
+        assert secagg.active is True
+        assert secagg.clipping_range == 100
         exp = mock_experiment.return_value
         assert exp.run_once.call_count == 3
         assert exp.save_training_replies.call_count == 3
@@ -527,6 +570,41 @@ class TestRunTask:
         assert mock_experiment.call_args.kwargs["tensorboard"] is True
         assert (dpath_tensorboard / "NODE_2").is_dir()
 
+    @pytest.mark.filterwarnings("ignore:.*data leakage")
+    def test_no_secagg(
+        self,
+        module: ModuleType,
+        mock_experiment: MagicMock,
+        mock_evaluate_held_out: MagicMock,
+        mock_setup_held_out_secagg: MagicMock,
+        tmp_path: Path,
+    ):
+        module._run_task(
+            "sex",
+            n_rounds=1,
+            batch_size=8,
+            n_updates=10,
+            learning_rate=0.1,
+            test_ratio=0.2,
+            aggregator="fedavg",
+            fedprox_mu=1.0,
+            alpha=0.1,
+            settings={},
+            fpath_results=tmp_path / "results.json",
+            fpath_model=tmp_path / "model.pkl",
+            training_nodes=["NODE_1", "NODE_2"],
+            node_data_held_out={"NODE_3": NODE_DATA["NODE_3"]},
+            secagg=False,
+        )
+        secagg = mock_experiment.call_args.kwargs["secagg"]
+        assert secagg.active is False
+        # default clipping range
+        assert secagg.clipping_range is None
+        mock_setup_held_out_secagg.assert_not_called()
+        mock_evaluate_held_out.assert_called_with(
+            mock_experiment.return_value, {"NODE_3": NODE_DATA["NODE_3"]}, None
+        )
+
     @pytest.mark.parametrize(("task", "n_warnings"), [("age", 2), ("sex", 1)])
     def test_leakage_warnings(
         self,
@@ -563,6 +641,7 @@ class TestRunTask:
         module: ModuleType,
         mock_experiment: MagicMock,
         mock_evaluate_held_out: MagicMock,
+        mock_setup_held_out_secagg: MagicMock,
         tmp_path: Path,
     ):
         fpath_results = tmp_path / "results.json"
@@ -591,7 +670,13 @@ class TestRunTask:
         exp = mock_experiment.return_value
         # before each round and after the last one
         assert mock_evaluate_held_out.call_count == 4
-        mock_evaluate_held_out.assert_called_with(exp, node_data_held_out)
+        # all the nodes, so that the context has at least 2 nodes
+        mock_setup_held_out_secagg.assert_called_once_with(
+            exp, ["NODE_1", "NODE_2", "NODE_3"]
+        )
+        mock_evaluate_held_out.assert_called_with(
+            exp, node_data_held_out, mock_setup_held_out_secagg.return_value
+        )
         json_data = json.loads(fpath_results.read_text())
         assert json_data["settings"]["training_nodes"] == ["NODE_1", "NODE_2"]
         assert json_data["settings"]["held_out_node"] == node_data_held_out
@@ -657,6 +742,15 @@ class TestMain:
         assert settings["learning_rate"] == module.DEFAULT_LEARNING_RATE
         assert settings["overwrite"] is False
         assert settings["tensorboard"] is True
+        assert settings["secagg"] is True
+        assert kwargs["secagg"] is True
+
+    def test_no_secagg(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        module.main([str(tmp_path), "--task", "age", "--no-secagg", "--no-cv"])
+        assert mock_run_task.call_args.kwargs["secagg"] is False
+        assert mock_run_task.call_args.kwargs["settings"]["secagg"] is False
 
     def test_aggregator_options(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
@@ -746,17 +840,38 @@ class TestMain:
         assert kwargs["training_nodes"] is None
         assert kwargs["node_data_held_out"] is None
 
-    def test_cv_one_node(
+    @pytest.mark.parametrize(
+        ("secagg", "n_nodes", "match"),
+        [
+            (False, 1, "at least 2 nodes, "),
+            (True, 2, "at least 3 nodes with secure aggregation"),
+        ],
+    )
+    def test_cv_not_enough_nodes(
+        self,
+        module: ModuleType,
+        mock_run_task: MagicMock,
+        mock_get_node_data: MagicMock,
+        tmp_path: Path,
+        secagg: bool,
+        n_nodes: int,
+        match: str,
+    ):
+        mock_get_node_data.return_value = dict(list(NODE_DATA.items())[:n_nodes])
+        with pytest.raises(ValueError, match=match):
+            module.run_experiments(tmp_path, ["age"], secagg=secagg)
+        mock_run_task.assert_not_called()
+
+    def test_cv_two_nodes_no_secagg(
         self,
         module: ModuleType,
         mock_run_task: MagicMock,
         mock_get_node_data: MagicMock,
         tmp_path: Path,
     ):
-        mock_get_node_data.return_value = {"NODE_1": NODE_DATA["NODE_1"]}
-        with pytest.raises(ValueError, match="at least 2 nodes"):
-            module.run_experiments(tmp_path, ["age"])
-        mock_run_task.assert_not_called()
+        mock_get_node_data.return_value = dict(list(NODE_DATA.items())[:2])
+        module.run_experiments(tmp_path, ["age"], secagg=False)
+        assert mock_run_task.call_count == 2
 
     def test_cv_existing_results(
         self,
