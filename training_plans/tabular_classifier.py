@@ -37,6 +37,15 @@ class TabularClassifierTrainingPlan(FedSGDClassifier):
             lr=optimizer_args["lr"], modules=modules, regularizers=regularizers
         )
 
+    def set_data_loaders(self, train_data_loader, test_data_loader):
+        if train_data_loader is None:
+            # no training data when the node only tests the model
+            # used in held-out node validation
+            self.training_data_loader = None
+            self.testing_data_loader = test_data_loader
+        else:
+            super().set_data_loaders(train_data_loader, test_data_loader)
+
     def training_data(self):
         model_args = self.model_args()
         columns = list(model_args["feature_columns"])

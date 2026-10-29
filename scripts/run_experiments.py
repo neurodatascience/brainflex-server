@@ -410,7 +410,7 @@ def _evaluate_held_out(
         },
         only_required=False,
     )
-    TrainingJob(
+    replies, _ = TrainingJob(
         researcher_id=exp.researcher_id,
         requests=exp.requests,
         nodes=list(node_data_held_out),
@@ -426,6 +426,15 @@ def _evaluate_held_out(
         secagg_arguments=secagg_arguments,
         do_training=False,
     ).execute()
+    # the metrics are sent separately, so a failed request would go unnoticed
+    for node in node_data_held_out:
+        if node not in replies:
+            raise RuntimeError(f"Held-out node {node} did not reply")
+        if not replies[node]["success"]:
+            raise RuntimeError(
+                f"Held-out node {node} failed to evaluate the model:"
+                f" {replies[node]['msg']}"
+            )
 
 
 def _run_task(

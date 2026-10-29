@@ -202,6 +202,10 @@ class TestEvaluateHeldOut:
         self, module: ModuleType, mock_experiment: MagicMock, mocker: MockerFixture
     ):
         mock_training_job = mocker.patch.object(module, "TrainingJob", autospec=True)
+        mock_training_job.return_value.execute.return_value = (
+            {"NODE_3": {"success": True, "msg": ""}},
+            {},
+        )
         mock_experiment(
             training_args={"test_ratio": 0.1, "test_on_local_updates": True}
         )
@@ -231,6 +235,10 @@ class TestEvaluateHeldOut:
         self, module: ModuleType, mock_experiment: MagicMock, mocker: MockerFixture
     ):
         mock_training_job = mocker.patch.object(module, "TrainingJob", autospec=True)
+        mock_training_job.return_value.execute.return_value = (
+            {"NODE_3": {"success": True, "msg": ""}},
+            {},
+        )
         mock_experiment(training_args={})
         exp = mock_experiment.return_value
         exp.model_args.side_effect = None
@@ -240,6 +248,29 @@ class TestEvaluateHeldOut:
         )
         kwargs = mock_training_job.call_args.kwargs
         assert kwargs["secagg_arguments"] == secagg_arguments
+
+    @pytest.mark.parametrize(
+        "replies,match",
+        [
+            ({}, "did not reply"),
+            ({"NODE_3": {"success": False, "msg": "error"}}, "failed.*: error"),
+        ],
+    )
+    def test_failed(
+        self,
+        module: ModuleType,
+        mock_experiment: MagicMock,
+        mocker: MockerFixture,
+        replies: dict,
+        match: str,
+    ):
+        mock_training_job = mocker.patch.object(module, "TrainingJob", autospec=True)
+        mock_training_job.return_value.execute.return_value = (replies, {})
+        mock_experiment(training_args={})
+        exp = mock_experiment.return_value
+        exp.model_args.side_effect = None
+        with pytest.raises(RuntimeError, match=match):
+            module._evaluate_held_out(exp, {"NODE_3": NODE_DATA["NODE_3"]})
 
 
 class TestSetupHeldOutSecagg:

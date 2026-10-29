@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -98,3 +99,10 @@ class TestTabularClassifierTrainingPlan:
         optimizer_config: Callable[[BaseTrainingPlan, dict, dict], dict | None],
     ):
         assert optimizer_config(plan_cls(), model_args, {}) is None
+
+    def test_no_training_data(self, plan_cls: type[BaseTrainingPlan]):
+        plan = plan_cls()
+        test_data_loader = MagicMock()
+        plan.set_data_loaders(None, test_data_loader)
+        assert plan.training_data_loader is None
+        assert plan.testing_data_loader is test_data_loader
