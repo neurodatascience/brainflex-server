@@ -278,18 +278,31 @@ def _get_node_data(task: str) -> dict[str, dict]:
 
 
 def _get_feature_stats(
-    analytics: FederatedAnalytics, target_column: str
+    analytics: FederatedAnalytics, node_data: dict[str, dict], target_column: str
 ) -> tuple[list[str], list[float], list[float], dict[str, list[str]], float]:
     """Get the feature/excluded columns, some stats, and the target variable's mean."""
-    result = analytics.fetch_stats(["mean", "std"])
+    excluded_columns: dict[str, list[str]] = defaultdict(list)
+    column_sets = [set(dataset["dtypes"]) for dataset in node_data.values()]
+    common_columns = set.intersection(*column_sets)
+    if target_column not in common_columns:
+        raise ValueError(
+            f"Target column {target_column} is not in the datasets of all nodes"
+        )
+    if missing_columns := sorted(set.union(*column_sets) - common_columns):
+        excluded_columns["not in the datasets of all nodes"] = missing_columns
+    stats_columns: list[str] = []
+    for column in sorted(common_columns):
+        if column == target_column or _filter_feature_col(column):
+            stats_columns.append(column)
+        else:
+            excluded_columns["not in feature column list"].append(column)
+
+    # with secure aggregation, all nodes must compute the stats of the same columns
+    result = analytics.fetch_stats(["mean", "std"], dataset_schema=stats_columns)
     mean = result.global_stats("mean")
     std = result.global_stats("std")
-    excluded_columns: dict[str, list[str]] = defaultdict(list)
     columns: list[str] = []
-    for column in mean:
-        if not _filter_feature_col(column):
-            excluded_columns["not in feature column list"].append(column)
-            continue
+    for column in stats_columns:
         if not math.isfinite(std[column]) or std[column] == 0:
             excluded_columns["zero or infinite standard deviation"].append(column)
             continue
@@ -477,7 +490,7 @@ def _run_task(
 
     # the training plan needs the feature stats to be instantiated
     columns, mean, std, excluded_columns, target_mean = _get_feature_stats(
-        exp.analytics, config.target_column
+        exp.analytics, exp.training_data().data(), config.target_column
     )
     print(f"[{task}] Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)

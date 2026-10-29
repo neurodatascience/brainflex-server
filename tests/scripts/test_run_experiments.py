@@ -38,7 +38,11 @@ NODE_METRICS = {
 }
 TRAINING_REPLIES = {0: {"NODE_1": {"success": True, "sample_size": 80}}}
 NODE_DATA = {
-    node: {"dataset_id": f"dataset_{node}", "name": f"name_{node}"}
+    node: {
+        "dataset_id": f"dataset_{node}",
+        "name": f"name_{node}",
+        "dtypes": dict.fromkeys(GLOBAL_STATS["mean"], "Float64"),
+    }
     for node in ["NODE_1", "NODE_2", "NODE_3"]
 }
 
@@ -88,6 +92,7 @@ def mock_experiment(
     mock_experiment = mocker.patch.object(module, "Experiment")
     exp = mock_experiment.return_value
     exp.analytics = analytics
+    exp.training_data.return_value.data.return_value = NODE_DATA
     # mimic the getters of a real Experiment
     exp.model_args.side_effect = lambda: exp.set_model_args.call_args.args[0]
     exp.training_args.side_effect = lambda: TrainingArgs(
@@ -287,14 +292,17 @@ class TestFilterFeatureCol:
 class TestGetFeatureStats:
     def test_target_dropped(self, module: ModuleType, analytics: MagicMock):
         columns, mean, std, excluded_columns, target_mean = module._get_feature_stats(
-            analytics, "nb:Age"
+            analytics, NODE_DATA, "nb:Age"
         )
         assert columns == ["Left-Hippocampus", "Left-Thalamus", "nb:Sex"]
         assert target_mean == 30.0
         assert mean == [4000.0, 7000.0, 0.5]
         assert std == [100.0, 50.0, 0.5]
         assert not excluded_columns
-        analytics.fetch_stats.assert_called_once_with(["mean", "std"])
+        analytics.fetch_stats.assert_called_once_with(
+            ["mean", "std"],
+            dataset_schema=["Left-Hippocampus", "Left-Thalamus", "nb:Age", "nb:Sex"],
+        )
 
     def test_excluded_columns(self, module: ModuleType, analytics: MagicMock):
         stats = {
@@ -312,12 +320,23 @@ class TestGetFeatureStats:
             },
         }
         analytics.fetch_stats.return_value.global_stats.side_effect = stats.get
+        node_data = {
+            node: {"dtypes": dict.fromkeys(stats["mean"], "Float64")}
+            for node in ["NODE_1", "NODE_2"]
+        }
+        # only in the dataset of one node
+        node_data["NODE_1"]["dtypes"]["Left-Amygdala"] = "Float64"
         columns, mean, std, excluded_columns, _ = module._get_feature_stats(
-            analytics, "nb:Age"
+            analytics, node_data, "nb:Age"
         )
         assert columns == ["Left-Hippocampus", "Left-Thalamus", "nb:Sex"]
         assert len(mean) == len(std) == 3
+        assert (
+            "lhSurfaceHoles"
+            not in (analytics.fetch_stats.call_args.kwargs["dataset_schema"])
+        )
         assert excluded_columns == {
+            "not in the datasets of all nodes": ["Left-Amygdala"],
             "not in feature column list": ["lhSurfaceHoles"],
             "zero or infinite standard deviation": [
                 "Left-Caudate",
@@ -326,7 +345,16 @@ class TestGetFeatureStats:
         }
 
     def test_json_serializable(self, module: ModuleType, analytics: MagicMock):
-        json.dumps(module._get_feature_stats(analytics, "nb:Sex"))
+        json.dumps(module._get_feature_stats(analytics, NODE_DATA, "nb:Sex"))
+
+    def test_target_not_in_all_nodes(self, module: ModuleType, analytics: MagicMock):
+        node_data = {
+            "NODE_1": {"dtypes": {"nb:Age": "Float64", "nb:Sex": "Int64"}},
+            "NODE_2": {"dtypes": {"nb:Sex": "Int64"}},
+        }
+        with pytest.raises(ValueError, match="not in the datasets of all nodes"):
+            module._get_feature_stats(analytics, node_data, "nb:Age")
+        analytics.fetch_stats.assert_not_called()
 
 
 class TestBuildModelArgs:
@@ -348,7 +376,7 @@ class TestBuildModelArgs:
     ):
         config = module.TASKS[task]
         columns, mean, std, _, target_mean = module._get_feature_stats(
-            analytics, target_column
+            analytics, NODE_DATA, target_column
         )
         model_args = module._build_model_args(
             task, columns, mean, std, 0.1, target_mean
