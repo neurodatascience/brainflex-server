@@ -1,3 +1,4 @@
+import dataclasses
 import importlib.util
 import json
 import logging
@@ -162,7 +163,10 @@ def path_helper(module: ModuleType, tmp_path: Path) -> object:
         learning_rate=0.001,
         test_ratio=0.2,
         aggregator="scaffold",
+        fedprox_mu=2.0,
         alpha=0.1,
+        secagg=True,
+        cv=True,
     )
 
 
@@ -172,8 +176,21 @@ class TestPathHelper:
             tmp_path
             / "2026_01_01"
             / "age"
-            / "results-scaffold-10rounds-50updates-32-0.001lr-0.2test-0.1alpha.json"
+            / (
+                "results-scaffold-10rounds-50updates-32-0.001lr-0.2test-0.1alpha"
+                "-secagg-cv.json"
+            )
         )
+
+    def test_no_secagg_no_cv(self, path_helper: object):
+        path_helper = dataclasses.replace(path_helper, secagg=False, cv=False)
+        fpath = path_helper.get_fpath_out("age", "results")
+        assert fpath.stem.endswith("-0.1alpha-no_secagg-no_cv")
+
+    def test_fedprox(self, path_helper: object):
+        path_helper = dataclasses.replace(path_helper, aggregator="fedprox")
+        fpath = path_helper.get_fpath_out("age", "results")
+        assert fpath.name.startswith("results-fedprox_2.0mu-")
 
     def test_extension(self, path_helper: object, tmp_path: Path):
         fpath = path_helper.get_fpath_out("sex", "model", ".pkl")
@@ -184,7 +201,7 @@ class TestPathHelper:
         fpath = path_helper.get_fpath_out(
             "age", "model", ".pkl", held_out_node="NODE_1"
         )
-        assert fpath.name.endswith("-0.1alpha-heldout_NODE_1.pkl")
+        assert fpath.name.endswith("-0.1alpha-secagg-cv-heldout_NODE_1.pkl")
 
 
 class TestGetNodeData:
@@ -528,8 +545,8 @@ class TestLogToFile:
             fbm_logger.error("fbm security", extra={"is_security": True})
         lines = fpath_log.read_text().splitlines()
         assert len(lines) == 3
-        assert lines[0].endswith("brainflex.run_experiments INFO - script info")
-        assert lines[1].endswith("brainflex.run_experiments WARNING - script warning")
+        assert lines[0].endswith("brainflex INFO - script info")
+        assert lines[1].endswith("brainflex WARNING - script warning")
         assert lines[2].endswith("fedbiomed WARNING - fbm warning")
 
     def test_handler_removed_on_error(self, module: ModuleType, tmp_path: Path):
@@ -816,7 +833,10 @@ def _write_results(
     held_out_node: str | None = None,
     date_tag: str | None = None,
 ) -> None:
-    """Write a results file for the default CLI arguments."""
+    """Write a results file for the default CLI arguments.
+
+    CV is assumed to be on if and only if ``held_out_node`` is given.
+    """
     fpath = module.PathHelper(
         output_dir=dpath,
         date_tag=date_tag if date_tag is not None else module.DEFAULT_DATE_TAG,
@@ -826,7 +846,10 @@ def _write_results(
         learning_rate=module.DEFAULT_LEARNING_RATE,
         test_ratio=module.DEFAULT_TEST_RATIO,
         aggregator=module.DEFAULT_AGGREGATOR,
+        fedprox_mu=module.DEFAULT_FEDPROX_MU,
         alpha=module.DEFAULT_ALPHA,
+        secagg=module.DEFAULT_SECAGG,
+        cv=held_out_node is not None,
     ).get_fpath_out(task, module.PREFIX_RESULTS, held_out_node=held_out_node)
     fpath.parent.mkdir(parents=True)
     fpath.write_text(json.dumps(data))
@@ -939,8 +962,8 @@ class TestMain:
         assert kwargs["aggregator"] == "fedprox"
         assert kwargs["fedprox_mu"] == 5.0
         assert kwargs["alpha"] == 0.5
-        assert kwargs["fpath_results"].name.startswith("results-fedprox-")
-        assert kwargs["fpath_results"].stem.endswith("-0.5alpha")
+        assert kwargs["fpath_results"].name.startswith("results-fedprox_5.0mu-")
+        assert "-0.5alpha-" in kwargs["fpath_results"].stem
 
     def test_no_tensorboard(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
@@ -1066,14 +1089,17 @@ class TestMain:
             module.main([str(tmp_path), "--task", "age"])
         mock_run_task.assert_not_called()
 
-    @pytest.mark.parametrize("args", [[], ["--task", "height"]])
+    def test_default_tasks(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        module.main([str(tmp_path), "--no-cv"])
+        assert [
+            call.kwargs["task"] for call in mock_run_task.call_args_list
+        ] == module.DEFAULT_TASKS
+
     def test_invalid_task(
-        self,
-        module: ModuleType,
-        mock_run_task: MagicMock,
-        tmp_path: Path,
-        args: list[str],
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         with pytest.raises(SystemExit):
-            module.main([str(tmp_path), *args])
+            module.main([str(tmp_path), "--task", "height"])
         mock_run_task.assert_not_called()

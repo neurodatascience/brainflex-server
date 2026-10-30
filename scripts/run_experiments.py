@@ -84,6 +84,7 @@ class PathHelper:
     learning_rate: float
     test_ratio: float
     aggregator: str
+    fedprox_mu: float
     alpha: float
     secagg: bool
     cv: bool
@@ -101,7 +102,7 @@ class PathHelper:
                 (
                     self.aggregator
                     if self.aggregator != "fedprox"
-                    else f"{self.aggregator}_{DEFAULT_FEDPROX_MU}mu"
+                    else f"{self.aggregator}_{self.fedprox_mu}mu"
                 ),
                 f"{self.n_rounds}rounds",
                 f"{self.n_updates}updates",
@@ -695,6 +696,7 @@ def run_experiments(
         learning_rate=learning_rate,
         test_ratio=test_ratio,
         aggregator=aggregator,
+        fedprox_mu=fedprox_mu,
         alpha=alpha,
         secagg=secagg,
         cv=cv,
