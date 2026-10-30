@@ -11,6 +11,7 @@ import sys
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from pathlib import Path
 
@@ -41,6 +42,7 @@ DEFAULT_TEST_RATIO = 0.1
 DEFAULT_AGGREGATOR = "scaffold"
 DEFAULT_FEDPROX_MU = 1.0
 DEFAULT_ALPHA = 0.1
+DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,7 @@ class TaskConfig:
 @dataclass(frozen=True)
 class PathHelper:
     output_dir: Path
+    date_tag: str
     n_rounds: int
     batch_size: int
     n_updates: int
@@ -89,7 +92,7 @@ class PathHelper:
         )
         if held_out_node is not None:
             stem = f"{stem}-heldout_{held_out_node}"
-        return self.output_dir / task / f"{stem}{extension}"
+        return self.output_dir / self.date_tag / task / f"{stem}{extension}"
 
 
 TASKS = {
@@ -115,6 +118,14 @@ def _get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "output_dir", type=Path, help="Directory to save the global models to."
+    )
+    parser.add_argument(
+        "--date-tag",
+        default=DEFAULT_DATE_TAG,
+        help=(
+            "Name of the subfolder of the output directory to save results to."
+            f" Default: {DEFAULT_DATE_TAG}."
+        ),
     )
     parser.add_argument(
         "--task",
@@ -567,6 +578,7 @@ def _run_task(
 def run_experiments(
     output_dir: Path,
     tasks: list[str],
+    date_tag: str = DEFAULT_DATE_TAG,
     n_rounds: int = DEFAULT_N_ROUNDS,
     batch_size: int = DEFAULT_BATCH_SIZE,
     n_updates: int = DEFAULT_N_UPDATES,
@@ -604,6 +616,7 @@ def run_experiments(
 
     path_helper = PathHelper(
         output_dir=output_dir,
+        date_tag=date_tag,
         n_rounds=n_rounds,
         batch_size=batch_size,
         n_updates=n_updates,
@@ -686,6 +699,7 @@ def main(argv: list[str] | None = None) -> None:
         run_experiments(
             args.output_dir,
             args.tasks,
+            date_tag=args.date_tag,
             n_rounds=args.n_rounds,
             batch_size=args.batch_size,
             n_updates=args.n_updates,

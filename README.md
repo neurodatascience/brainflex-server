@@ -104,7 +104,7 @@ The experiment script can be invoked via e.g.:
 docker compose exec -u fedbiomed researcher python /brainflex-server/scripts/run_experiments.py --help
 ```
 
-The output directory should be `fbm-researcher/results` inside the container.
+The output directory should be `/fbm-researcher/results` inside the container.
 
 ### Stopping
 

@@ -155,6 +155,7 @@ class TestLoadTrainingPlanClass:
 def path_helper(module: ModuleType, tmp_path: Path) -> object:
     return module.PathHelper(
         output_dir=tmp_path,
+        date_tag="2026_01_01",
         n_rounds=10,
         batch_size=32,
         n_updates=50,
@@ -169,13 +170,14 @@ class TestPathHelper:
     def test_get_fpath_out(self, path_helper: object, tmp_path: Path):
         assert path_helper.get_fpath_out("age", "results") == (
             tmp_path
+            / "2026_01_01"
             / "age"
             / "results-scaffold-10rounds-50updates-32-0.001lr-0.2test-0.1alpha.json"
         )
 
     def test_extension(self, path_helper: object, tmp_path: Path):
         fpath = path_helper.get_fpath_out("sex", "model", ".pkl")
-        assert fpath.parent == tmp_path / "sex"
+        assert fpath.parent == tmp_path / "2026_01_01" / "sex"
         assert fpath.suffix == ".pkl"
 
     def test_held_out_node(self, path_helper: object):
@@ -757,10 +759,12 @@ def _write_results(
     task: str,
     data: dict,
     held_out_node: str | None = None,
+    date_tag: str | None = None,
 ) -> None:
     """Write a results file for the default CLI arguments."""
     fpath = module.PathHelper(
         output_dir=dpath,
+        date_tag=date_tag if date_tag is not None else module.DEFAULT_DATE_TAG,
         n_rounds=module.DEFAULT_N_ROUNDS,
         batch_size=module.DEFAULT_BATCH_SIZE,
         n_updates=module.DEFAULT_N_UPDATES,
@@ -795,23 +799,33 @@ class TestMain:
         ]
         kwargs = mock_run_task.call_args.kwargs
         assert kwargs["n_rounds"] == 2
-        assert kwargs["fpath_results"].parent == tmp_path.resolve() / "age"
+        dpath_date = tmp_path.resolve() / module.DEFAULT_DATE_TAG
+        assert kwargs["fpath_results"].parent == dpath_date / "age"
         assert kwargs["fpath_results"].name.startswith("results-scaffold-2rounds-")
         assert kwargs["fpath_model"].name.startswith("model-scaffold-2rounds-")
         assert kwargs["fpath_model"].suffix == ".pkl"
-        assert kwargs["dpath_tensorboard"].parent == tmp_path.resolve() / "age"
+        assert kwargs["dpath_tensorboard"].parent == dpath_date / "age"
         assert kwargs["dpath_tensorboard"].name.startswith(
             "tensorboard-scaffold-2rounds-"
         )
         settings = kwargs["settings"]
         assert settings["output_dir"] == tmp_path.resolve()
         assert settings["tasks"] == ["sex", "age"]
+        assert settings["date_tag"] == module.DEFAULT_DATE_TAG
         assert settings["n_rounds"] == 2
         assert settings["learning_rate"] == module.DEFAULT_LEARNING_RATE
         assert settings["overwrite"] is False
         assert settings["tensorboard"] is True
         assert settings["secagg"] is True
         assert kwargs["secagg"] is True
+
+    def test_date_tag(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        module.main([str(tmp_path), "--task", "age", "--date-tag", "mytag", "--no-cv"])
+        kwargs = mock_run_task.call_args.kwargs
+        assert kwargs["fpath_results"].parent == tmp_path.resolve() / "mytag" / "age"
+        assert kwargs["settings"]["date_tag"] == "mytag"
 
     def test_no_secagg(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
@@ -864,6 +878,15 @@ class TestMain:
     ):
         # a run that failed before any results were saved can be rerun
         _write_results(module, tmp_path.resolve(), "age", {"settings": {}})
+        module.main([str(tmp_path), "--task", "age", "--no-cv"])
+        mock_run_task.assert_called_once()
+
+    def test_existing_results_other_date_tag(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        _write_results(
+            module, tmp_path.resolve(), "age", {"results": {}}, date_tag="old"
+        )
         module.main([str(tmp_path), "--task", "age", "--no-cv"])
         mock_run_task.assert_called_once()
 
