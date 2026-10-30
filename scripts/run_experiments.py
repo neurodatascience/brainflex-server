@@ -22,7 +22,6 @@ from declearn.optimizer.modules import ScaffoldServerModule
 from fedbiomed.common.metrics import MetricTypes
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_args import TrainingArgs
-from fedbiomed.common.training_plans import BaseTrainingPlan
 from fedbiomed.researcher.datasets import FederatedDataset
 from fedbiomed.researcher.federated_workflows import Experiment, FederatedAnalytics
 from fedbiomed.researcher.federated_workflows.jobs import TrainingJob
@@ -344,6 +343,12 @@ def _print_logger_messages_at_exit() -> Generator[None, None, None]:
         print("\n".join(handler.messages))
 
 
+def _get_log_prefix(task: str, held_out_node: str | None = None) -> str:
+    if held_out_node is None:
+        return f"[{task}]"
+    return f"[{task}|held_out={held_out_node}]"
+
+
 def _load_training_plan_class(module_name: str, class_name: str) -> type:
     spec = importlib.util.spec_from_file_location(
         f"training_plans.{module_name}",
@@ -528,23 +533,26 @@ def _run_task(
     aggregator: str,
     fedprox_mu: float,
     alpha: float,
-    settings: dict,
-    fpath_results: Path,
     fpath_model: Path,
     dpath_tensorboard: Path | None = None,
     training_nodes: list[str] | None = None,
     node_data_held_out: dict[str, dict] | None = None,
     secagg: bool = True,
-) -> BaseTrainingPlan:
+) -> Generator[tuple[str, dict], None, None]:
     """Train a model for a task and save it in a task-specific output directory.
 
     If ``node_data_held_out`` is given, only ``training_nodes`` are used for training
     and the held-out node is used for testing.
+
+    Yields the fold key (the training nodes joined by ``__``) and the fold settings
+    and results. Saves the model and TensorBoard logs after the last yield.
     """
     config = TASKS[task]
     is_cv = node_data_held_out is not None
+    held_out_node = next(iter(node_data_held_out)) if is_cv else None
+    prefix = _get_log_prefix(task, held_out_node)
     if is_cv:
-        logger.info(f"[{task}] Holding out node {', '.join(node_data_held_out)}")
+        logger.info(f"{prefix} Holding out node {held_out_node}")
     exp = Experiment(
         tags=[COMMON_TAG, task],
         nodes=training_nodes,
@@ -572,15 +580,16 @@ def _run_task(
         # redo the search to drop the held-out node
         # otherwise, it would be included in the federated analytics
         exp.set_training_data(None, from_tags=True)
+    fold_key = "__".join(sorted(exp.training_data().data()))
 
     if not is_cv:
         logger.warning(
-            f"[{task}] Feature z-scoring statistics are computed on all node data,"
+            f"{prefix} Feature z-scoring statistics are computed on all node data,"
             " including the test data (data leakage). Use --cv to avoid this"
         )
         if config.with_target_mean:
             logger.warning(
-                f"[{task}] The intercept is initialized with the target mean of all"
+                f"{prefix} The intercept is initialized with the target mean of all"
                 " node data, including the test data (data leakage). Use --cv to"
                 " avoid this"
             )
@@ -590,8 +599,8 @@ def _run_task(
         exp.analytics, exp.training_data().data(), config.target_column
     )
     for reason, cols in excluded_columns.items():
-        logger.info(f"[{task}] Excluding {len(cols)} features ({reason}): {cols}")
-    logger.info(f"[{task}] Using {len(columns)} features")
+        logger.info(f"{prefix} Excluding {len(cols)} features ({reason}): {cols}")
+    logger.info(f"{prefix} Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
     exp.set_training_plan_class(
@@ -601,9 +610,8 @@ def _run_task(
     )
 
     # saved before training so that they are available even if training fails
-    json_data = {
+    fold = {
         "settings": {
-            "runtime_args": settings,
             "training_nodes": training_nodes,
             "held_out_node": node_data_held_out,
             "excluded_columns": excluded_columns,
@@ -611,8 +619,7 @@ def _run_task(
             "training_args": exp.training_args(),
         }
     }
-    fpath_results.parent.mkdir(parents=True, exist_ok=True)
-    _save_json(fpath_results, json_data)
+    yield fold_key, fold
 
     held_out_secagg_arguments = None
     if is_cv and secagg:
@@ -621,31 +628,29 @@ def _run_task(
         )
 
     for round_ in range(1, n_rounds + 1):
-        logger.info(f"[{task}] Round {round_}/{n_rounds}")
+        logger.info(f"{prefix} Round {round_}/{n_rounds}")
         if is_cv:
             _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         exp.run_once()
-        json_data["results"] = {
+        fold["results"] = {
             # node training losses and test metrics (no public getter)
             "node_metrics": exp.monitor()._metric_store,
             "training_replies": exp.save_training_replies(),
         }
-        _save_json(fpath_results, json_data)
+        yield fold_key, fold
     if is_cv:
         # final global model
         _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
-        json_data["results"]["node_metrics"] = exp.monitor()._metric_store
-        _save_json(fpath_results, json_data)
-    logger.info(f"[{task}] Saved settings and results to {fpath_results}")
+        fold["results"]["node_metrics"] = exp.monitor()._metric_store
+        yield fold_key, fold
 
     if dpath_tensorboard is not None:
         _move_tensorboard_logs(exp, dpath_tensorboard)
-        logger.info(f"[{task}] Saved TensorBoard logs to {dpath_tensorboard}")
+        logger.info(f"{prefix} Saved TensorBoard logs to {dpath_tensorboard}")
 
     fpath_model.parent.mkdir(parents=True, exist_ok=True)
     exp.training_plan().export_model(str(fpath_model))
-    logger.info(f"[{task}] Saved global model to {fpath_model}")
-    return exp.training_plan()
+    logger.info(f"{prefix} Saved global model to {fpath_model}")
 
 
 def run_experiments(
@@ -669,12 +674,12 @@ def run_experiments(
     output_dir = output_dir.resolve()
     settings = locals().copy()
 
-    # (task, held-out node) pairs, with None for no held-out node
-    runs: list[tuple[str, str | None]] = []
+    # held-out nodes for each task, with None for no held-out node
+    runs: dict[str, list[str | None]] = {}
     node_data: dict[str, dict[str, dict]] = {}
     for task in tasks:
         if not cv:
-            runs.append((task, None))
+            runs[task] = [None]
             continue
         node_data[task] = _get_node_data(task)
         # secure aggregation needs at least 2 training nodes
@@ -685,7 +690,7 @@ def run_experiments(
                 f"{' with secure aggregation' if secagg else ''},"
                 f" but {task} has {len(node_data[task])}"
             )
-        runs.extend((task, node) for node in sorted(node_data[task]))
+        runs[task] = sorted(node_data[task])
 
     path_helper = PathHelper(
         output_dir=output_dir,
@@ -704,14 +709,14 @@ def run_experiments(
 
     # error out if one of the result files already exists
     fpaths_results_existing = []
-    for task, held_out_node in runs:
+    for task in runs:
         fpath = path_helper.get_fpath_out(
-            task=task,
-            prefix=PREFIX_RESULTS,
-            extension=".json",
-            held_out_node=held_out_node,
+            task=task, prefix=PREFIX_RESULTS, extension=".json"
         )
-        if fpath.exists() and "results" in json.loads(fpath.read_text()):
+        if fpath.exists() and any(
+            "results" in fold
+            for fold in json.loads(fpath.read_text()).get("folds", {}).values()
+        ):
             fpaths_results_existing.append(fpath)
 
     if fpaths_results_existing and not overwrite:
@@ -721,59 +726,63 @@ def run_experiments(
         )
 
     with _print_logger_messages_at_exit():
-        for task, held_out_node in runs:
-            if held_out_node is None:
-                # use all nodes for training
-                training_nodes = None
-                node_data_held_out = None
-            else:
-                training_nodes = sorted(set(node_data[task]) - {held_out_node})
-                node_data_held_out = {held_out_node: node_data[task][held_out_node]}
-
-            fpath_log = path_helper.get_fpath_out(
-                task=task,
-                prefix=PREFIX_LOGS,
-                extension=".log",
-                held_out_node=held_out_node,
+        for task, held_out_nodes in runs.items():
+            fpath_results = path_helper.get_fpath_out(
+                task=task, prefix=PREFIX_RESULTS, extension=".json"
             )
+            fpath_log = path_helper.get_fpath_out(
+                task=task, prefix=PREFIX_LOGS, extension=".log"
+            )
+            json_data = {"settings": {"runtime_args": settings}, "folds": {}}
+            fpath_results.parent.mkdir(parents=True, exist_ok=True)
             with _log_to_file(fpath_log):
-                _run_task(
-                    task=task,
-                    n_rounds=n_rounds,
-                    batch_size=batch_size,
-                    n_updates=n_updates,
-                    learning_rate=learning_rate,
-                    test_ratio=test_ratio,
-                    aggregator=aggregator,
-                    fedprox_mu=fedprox_mu,
-                    alpha=alpha,
-                    settings=settings,
-                    fpath_results=path_helper.get_fpath_out(
+                for held_out_node in held_out_nodes:
+                    if held_out_node is None:
+                        # use all nodes for training
+                        training_nodes = None
+                        node_data_held_out = None
+                    else:
+                        training_nodes = sorted(set(node_data[task]) - {held_out_node})
+                        node_data_held_out = {
+                            held_out_node: node_data[task][held_out_node]
+                        }
+
+                    for fold_key, fold in _run_task(
                         task=task,
-                        prefix=PREFIX_RESULTS,
-                        extension=".json",
-                        held_out_node=held_out_node,
-                    ),
-                    fpath_model=path_helper.get_fpath_out(
-                        task=task,
-                        prefix=PREFIX_MODEL,
-                        extension=".pkl",
-                        held_out_node=held_out_node,
-                    ),
-                    dpath_tensorboard=(
-                        path_helper.get_fpath_out(
+                        n_rounds=n_rounds,
+                        batch_size=batch_size,
+                        n_updates=n_updates,
+                        learning_rate=learning_rate,
+                        test_ratio=test_ratio,
+                        aggregator=aggregator,
+                        fedprox_mu=fedprox_mu,
+                        alpha=alpha,
+                        fpath_model=path_helper.get_fpath_out(
                             task=task,
-                            prefix=PREFIX_TENSORBOARD,
-                            extension="",
+                            prefix=PREFIX_MODEL,
+                            extension=".pkl",
                             held_out_node=held_out_node,
-                        )
-                        if tensorboard
-                        else None
-                    ),
-                    training_nodes=training_nodes,
-                    node_data_held_out=node_data_held_out,
-                    secagg=secagg,
-                )
+                        ),
+                        dpath_tensorboard=(
+                            path_helper.get_fpath_out(
+                                task=task,
+                                prefix=PREFIX_TENSORBOARD,
+                                extension="",
+                                held_out_node=held_out_node,
+                            )
+                            if tensorboard
+                            else None
+                        ),
+                        training_nodes=training_nodes,
+                        node_data_held_out=node_data_held_out,
+                        secagg=secagg,
+                    ):
+                        json_data["folds"][fold_key] = fold
+                        _save_json(fpath_results, json_data)
+                    logger.info(
+                        f"{_get_log_prefix(task, held_out_node)} Saved settings and"
+                        f" results to {fpath_results}"
+                    )
             logger.info(f"[{task}] Saved log to {fpath_log}")
 
 

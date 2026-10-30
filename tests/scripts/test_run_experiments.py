@@ -3,6 +3,7 @@ import importlib.util
 import json
 import logging
 import sys
+from collections.abc import Generator
 from enum import Enum
 from pathlib import Path
 from types import ModuleType
@@ -105,9 +106,20 @@ def mock_experiment(
     return mock_experiment
 
 
+def _fake_run_task(
+    training_nodes: list[str] | None = None, **kwargs
+) -> Generator[tuple[str, dict], None, None]:
+    """Yield a fold like _run_task, without training."""
+    fold_key = "__".join(training_nodes or NODE_DATA)
+    fold = {"settings": {"training_nodes": training_nodes}}
+    yield fold_key, fold
+    fold["results"] = {"node_metrics": {}}
+    yield fold_key, fold
+
+
 @pytest.fixture
 def mock_run_task(module: ModuleType, mocker: MockerFixture) -> MagicMock:
-    return mocker.patch.object(module, "_run_task")
+    return mocker.patch.object(module, "_run_task", side_effect=_fake_run_task)
 
 
 @pytest.fixture
@@ -587,23 +599,21 @@ class TestRunTask:
     def test_run_task(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
-        settings = {"n_rounds": 3}
-        fpath_results = tmp_path / "age" / "results.json"
         fpath_model = tmp_path / "age" / "model.pkl"
         with module._log_to_file(tmp_path / "logs.log"):
-            module._run_task(
-                "age",
-                n_rounds=3,
-                batch_size=8,
-                n_updates=10,
-                learning_rate=0.1,
-                test_ratio=0.2,
-                aggregator="scaffold",
-                fedprox_mu=1.0,
-                alpha=0.1,
-                settings=settings,
-                fpath_results=fpath_results,
-                fpath_model=fpath_model,
+            folds = list(
+                module._run_task(
+                    "age",
+                    n_rounds=3,
+                    batch_size=8,
+                    n_updates=10,
+                    learning_rate=0.1,
+                    test_ratio=0.2,
+                    aggregator="scaffold",
+                    fedprox_mu=1.0,
+                    alpha=0.1,
+                    fpath_model=fpath_model,
+                )
             )
 
         assert mock_experiment.call_args.kwargs["tags"] == ["brainflex", "age"]
@@ -633,10 +643,12 @@ class TestRunTask:
         )
         assert "[age] Using 3 features" in (tmp_path / "logs.log").read_text()
 
-        json_data = json.loads(fpath_results.read_text())
-        assert json_data["settings"]["runtime_args"] == settings
-        assert json_data["settings"]["excluded_columns"] == {}
-        model_args = json_data["settings"]["model_args"]
+        # before training and after each round
+        assert len(folds) == 4
+        assert {fold_key for fold_key, _ in folds} == {"NODE_1__NODE_2__NODE_3"}
+        fold = json.loads(json.dumps(folds[-1][1], default=module._serialize))
+        assert fold["settings"]["excluded_columns"] == {}
+        model_args = fold["settings"]["model_args"]
         assert model_args["target_column"] == "nb:Age"
         assert model_args["alpha"] == 0.1
         assert model_args["target_mean"] == 30.0
@@ -646,10 +658,10 @@ class TestRunTask:
             "nb:Sex",
         ]
         exp.set_model_args.assert_called_once_with(model_args)
-        training_args = json_data["settings"]["training_args"]
+        training_args = fold["settings"]["training_args"]
         assert training_args["test_metric"] == "MEAN_SQUARE_ERROR"
         # JSON object keys are strings
-        assert json_data["results"] == json.loads(
+        assert fold["results"] == json.loads(
             json.dumps(
                 {"node_metrics": NODE_METRICS, "training_replies": TRAINING_REPLIES}
             )
@@ -659,45 +671,45 @@ class TestRunTask:
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
         mock_experiment.return_value.run_once.side_effect = RuntimeError
-        fpath_results = tmp_path / "sex" / "results.json"
-        with pytest.raises(RuntimeError):
-            module._run_task(
-                "sex",
-                n_rounds=3,
-                batch_size=8,
-                n_updates=10,
-                learning_rate=0.1,
-                test_ratio=0.2,
-                aggregator="fedavg",
-                fedprox_mu=1.0,
-                alpha=0.1,
-                settings={},
-                fpath_results=fpath_results,
-                fpath_model=tmp_path / "sex" / "model.pkl",
-            )
-        json_data = json.loads(fpath_results.read_text())
-        assert json_data["settings"]["model_args"]["n_classes"] == 2
+        folds = module._run_task(
+            "sex",
+            n_rounds=3,
+            batch_size=8,
+            n_updates=10,
+            learning_rate=0.1,
+            test_ratio=0.2,
+            aggregator="fedavg",
+            fedprox_mu=1.0,
+            alpha=0.1,
+            fpath_model=tmp_path / "sex" / "model.pkl",
+        )
+        # yielded before training so that the settings can be saved
+        fold_key, fold = next(folds)
+        assert fold_key == "NODE_1__NODE_2__NODE_3"
+        assert fold["settings"]["model_args"]["n_classes"] == 2
         assert mock_experiment.call_args.kwargs["agg_optimizer"] is None
-        assert "results" not in json_data
+        with pytest.raises(RuntimeError):
+            next(folds)
+        assert "results" not in fold
 
     def test_tensorboard(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
         dpath_tensorboard = tmp_path / "age" / "tensorboard"
-        module._run_task(
-            "age",
-            n_rounds=1,
-            batch_size=8,
-            n_updates=10,
-            learning_rate=0.1,
-            test_ratio=0.2,
-            aggregator="scaffold",
-            fedprox_mu=1.0,
-            alpha=0.1,
-            settings={},
-            fpath_results=tmp_path / "age" / "results.json",
-            fpath_model=tmp_path / "age" / "model.pkl",
-            dpath_tensorboard=dpath_tensorboard,
+        list(
+            module._run_task(
+                "age",
+                n_rounds=1,
+                batch_size=8,
+                n_updates=10,
+                learning_rate=0.1,
+                test_ratio=0.2,
+                aggregator="scaffold",
+                fedprox_mu=1.0,
+                alpha=0.1,
+                fpath_model=tmp_path / "age" / "model.pkl",
+                dpath_tensorboard=dpath_tensorboard,
+            )
         )
         assert mock_experiment.call_args.kwargs["tensorboard"] is True
         assert (dpath_tensorboard / "NODE_2").is_dir()
@@ -710,22 +722,22 @@ class TestRunTask:
         mock_setup_held_out_secagg: MagicMock,
         tmp_path: Path,
     ):
-        module._run_task(
-            "sex",
-            n_rounds=1,
-            batch_size=8,
-            n_updates=10,
-            learning_rate=0.1,
-            test_ratio=0.2,
-            aggregator="fedavg",
-            fedprox_mu=1.0,
-            alpha=0.1,
-            settings={},
-            fpath_results=tmp_path / "results.json",
-            fpath_model=tmp_path / "model.pkl",
-            training_nodes=["NODE_1", "NODE_2"],
-            node_data_held_out={"NODE_3": NODE_DATA["NODE_3"]},
-            secagg=False,
+        list(
+            module._run_task(
+                "sex",
+                n_rounds=1,
+                batch_size=8,
+                n_updates=10,
+                learning_rate=0.1,
+                test_ratio=0.2,
+                aggregator="fedavg",
+                fedprox_mu=1.0,
+                alpha=0.1,
+                fpath_model=tmp_path / "model.pkl",
+                training_nodes=["NODE_1", "NODE_2"],
+                node_data_held_out={"NODE_3": NODE_DATA["NODE_3"]},
+                secagg=False,
+            )
         )
         secagg = mock_experiment.call_args.kwargs["secagg"]
         assert secagg.active is False
@@ -748,19 +760,19 @@ class TestRunTask:
         n_warnings: int,
     ):
         with module._log_to_file(tmp_path / "logs.log"):
-            module._run_task(
-                task,
-                n_rounds=1,
-                batch_size=8,
-                n_updates=10,
-                learning_rate=0.1,
-                test_ratio=0.2,
-                aggregator="fedavg",
-                fedprox_mu=1.0,
-                alpha=0.1,
-                settings={},
-                fpath_results=tmp_path / "results.json",
-                fpath_model=tmp_path / "model.pkl",
+            list(
+                module._run_task(
+                    task,
+                    n_rounds=1,
+                    batch_size=8,
+                    n_updates=10,
+                    learning_rate=0.1,
+                    test_ratio=0.2,
+                    aggregator="fedavg",
+                    fedprox_mu=1.0,
+                    alpha=0.1,
+                    fpath_model=tmp_path / "model.pkl",
+                )
             )
         assert [
             record.levelno
@@ -783,23 +795,27 @@ class TestRunTask:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ):
-        fpath_results = tmp_path / "results.json"
         node_data_held_out = {"NODE_3": NODE_DATA["NODE_3"]}
-        module._run_task(
-            "age",
-            n_rounds=3,
-            batch_size=8,
-            n_updates=10,
-            learning_rate=0.1,
-            test_ratio=0.2,
-            aggregator="scaffold",
-            fedprox_mu=1.0,
-            alpha=0.1,
-            settings={},
-            fpath_results=fpath_results,
-            fpath_model=tmp_path / "model.pkl",
-            training_nodes=["NODE_1", "NODE_2"],
-            node_data_held_out=node_data_held_out,
+        # the held-out node is dropped by the new search
+        exp = mock_experiment.return_value
+        exp.training_data.return_value.data.return_value = {
+            node: NODE_DATA[node] for node in ["NODE_1", "NODE_2"]
+        }
+        folds = list(
+            module._run_task(
+                "age",
+                n_rounds=3,
+                batch_size=8,
+                n_updates=10,
+                learning_rate=0.1,
+                test_ratio=0.2,
+                aggregator="scaffold",
+                fedprox_mu=1.0,
+                alpha=0.1,
+                fpath_model=tmp_path / "model.pkl",
+                training_nodes=["NODE_1", "NODE_2"],
+                node_data_held_out=node_data_held_out,
+            )
         )
         assert mock_experiment.call_args.kwargs["nodes"] == ["NODE_1", "NODE_2"]
         mock_experiment.return_value.set_training_data.assert_called_once_with(
@@ -817,12 +833,28 @@ class TestRunTask:
         mock_evaluate_held_out.assert_called_with(
             exp, node_data_held_out, mock_setup_held_out_secagg.return_value
         )
-        json_data = json.loads(fpath_results.read_text())
-        assert json_data["settings"]["training_nodes"] == ["NODE_1", "NODE_2"]
-        assert json_data["settings"]["held_out_node"] == node_data_held_out
-        assert "node_metrics" in json_data["results"]
+        # before training, after each round, and after the final evaluation
+        assert len(folds) == 5
+        fold_key, fold = folds[-1]
+        assert fold_key == "NODE_1__NODE_2"
+        assert fold["settings"]["training_nodes"] == ["NODE_1", "NODE_2"]
+        assert fold["settings"]["held_out_node"] == node_data_held_out
+        assert "node_metrics" in fold["results"]
         assert not any("data leakage" in r.getMessage() for r in caplog.records)
-        assert "[age] Holding out node NODE_3" in caplog.messages
+        assert "[age|held_out=NODE_3] Holding out node NODE_3" in caplog.messages
+        assert "[age|held_out=NODE_3] Round 1/3" in caplog.messages
+
+
+def _read_results(dpath_task: Path) -> tuple[Path, dict]:
+    """Read the only results file of a task."""
+    (fpath,) = dpath_task.glob("results-*.json")
+    return fpath, json.loads(fpath.read_text())
+
+
+RESULTS_WITH_FOLD = {
+    "settings": {"runtime_args": {}},
+    "folds": {"NODE_1__NODE_2": {"settings": {}, "results": {}}},
+}
 
 
 def _write_results(
@@ -830,13 +862,10 @@ def _write_results(
     dpath: Path,
     task: str,
     data: dict,
-    held_out_node: str | None = None,
+    cv: bool = False,
     date_tag: str | None = None,
 ) -> None:
-    """Write a results file for the default CLI arguments.
-
-    CV is assumed to be on if and only if ``held_out_node`` is given.
-    """
+    """Write a results file for the default CLI arguments."""
     fpath = module.PathHelper(
         output_dir=dpath,
         date_tag=date_tag if date_tag is not None else module.DEFAULT_DATE_TAG,
@@ -849,8 +878,8 @@ def _write_results(
         fedprox_mu=module.DEFAULT_FEDPROX_MU,
         alpha=module.DEFAULT_ALPHA,
         secagg=module.DEFAULT_SECAGG,
-        cv=held_out_node is not None,
-    ).get_fpath_out(task, module.PREFIX_RESULTS, held_out_node=held_out_node)
+        cv=cv,
+    ).get_fpath_out(task, module.PREFIX_RESULTS)
     fpath.parent.mkdir(parents=True)
     fpath.write_text(json.dumps(data))
 
@@ -878,23 +907,25 @@ class TestMain:
         kwargs = mock_run_task.call_args.kwargs
         assert kwargs["n_rounds"] == 2
         dpath_date = tmp_path.resolve() / module.DEFAULT_DATE_TAG
-        assert kwargs["fpath_results"].parent == dpath_date / "age"
-        assert kwargs["fpath_results"].name.startswith("results-scaffold-2rounds-")
+        fpath_results, json_data = _read_results(dpath_date / "age")
+        assert fpath_results.name.startswith("results-scaffold-2rounds-")
         assert kwargs["fpath_model"].name.startswith("model-scaffold-2rounds-")
         assert kwargs["fpath_model"].suffix == ".pkl"
         # created by _log_to_file even though _run_task is mocked
-        fpath_log = (
-            dpath_date
-            / "age"
-            / kwargs["fpath_results"].name.replace("results-", "logs-")
-        )
+        fpath_log = dpath_date / "age" / fpath_results.name.replace("results-", "logs-")
         assert fpath_log.with_suffix(".log").exists()
         assert kwargs["dpath_tensorboard"].parent == dpath_date / "age"
         assert kwargs["dpath_tensorboard"].name.startswith(
             "tensorboard-scaffold-2rounds-"
         )
-        settings = kwargs["settings"]
-        assert settings["output_dir"] == tmp_path.resolve()
+        assert json_data["folds"] == {
+            "NODE_1__NODE_2__NODE_3": {
+                "settings": {"training_nodes": None},
+                "results": {"node_metrics": {}},
+            }
+        }
+        settings = json_data["settings"]["runtime_args"]
+        assert settings["output_dir"] == str(tmp_path.resolve())
         assert settings["tasks"] == ["sex", "age"]
         assert settings["date_tag"] == module.DEFAULT_DATE_TAG
         assert settings["n_rounds"] == 2
@@ -911,35 +942,39 @@ class TestMain:
         tmp_path: Path,
         capsys: pytest.CaptureFixture,
     ):
-        def run_task(task: str, **kwargs):
+        def run_task(task: str, **kwargs) -> Generator[tuple[str, dict], None, None]:
             module.logger.info(f"[{task}] done")
             assert capsys.readouterr().out == ""
             if task == "age":
                 raise RuntimeError
+            yield from _fake_run_task(**kwargs)
 
         mock_run_task.side_effect = run_task
         with pytest.raises(RuntimeError):
             module.main([str(tmp_path), "--task", "sex", "--task", "age", "--no-cv"])
         lines = capsys.readouterr().out.splitlines()
         assert lines[0] == "INFO - [sex] done"
-        assert lines[1].startswith("INFO - [sex] Saved log to ")
-        # no "Saved log" message for the failed run
-        assert lines[2:] == ["INFO - [age] done"]
+        assert lines[1].startswith("INFO - [sex] Saved settings and results to ")
+        assert lines[2].startswith("INFO - [sex] Saved log to ")
+        # no "Saved" messages for the failed run
+        assert lines[3:] == ["INFO - [age] done"]
 
     def test_date_tag(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         module.main([str(tmp_path), "--task", "age", "--date-tag", "mytag", "--no-cv"])
-        kwargs = mock_run_task.call_args.kwargs
-        assert kwargs["fpath_results"].parent == tmp_path.resolve() / "mytag" / "age"
-        assert kwargs["settings"]["date_tag"] == "mytag"
+        _, json_data = _read_results(tmp_path.resolve() / "mytag" / "age")
+        assert json_data["settings"]["runtime_args"]["date_tag"] == "mytag"
 
     def test_no_secagg(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         module.main([str(tmp_path), "--task", "age", "--no-secagg", "--no-cv"])
         assert mock_run_task.call_args.kwargs["secagg"] is False
-        assert mock_run_task.call_args.kwargs["settings"]["secagg"] is False
+        _, json_data = _read_results(
+            tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
+        )
+        assert json_data["settings"]["runtime_args"]["secagg"] is False
 
     def test_aggregator_options(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
@@ -962,20 +997,26 @@ class TestMain:
         assert kwargs["aggregator"] == "fedprox"
         assert kwargs["fedprox_mu"] == 5.0
         assert kwargs["alpha"] == 0.5
-        assert kwargs["fpath_results"].name.startswith("results-fedprox_5.0mu-")
-        assert "-0.5alpha-" in kwargs["fpath_results"].stem
+        fpath_results, _ = _read_results(
+            tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
+        )
+        assert fpath_results.name.startswith("results-fedprox_5.0mu-")
+        assert "-0.5alpha-" in fpath_results.stem
 
     def test_no_tensorboard(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         module.main([str(tmp_path), "--task", "age", "--no-tensorboard", "--no-cv"])
         assert mock_run_task.call_args.kwargs["dpath_tensorboard"] is None
-        assert mock_run_task.call_args.kwargs["settings"]["tensorboard"] is False
+        _, json_data = _read_results(
+            tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
+        )
+        assert json_data["settings"]["runtime_args"]["tensorboard"] is False
 
     def test_existing_results(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
-        _write_results(module, tmp_path.resolve(), "age", {"results": {}})
+        _write_results(module, tmp_path.resolve(), "age", RESULTS_WITH_FOLD)
         with pytest.raises(SystemExit, match="--overwrite"):
             module.main([str(tmp_path), "--task", "sex", "--task", "age", "--no-cv"])
         mock_run_task.assert_not_called()
@@ -984,7 +1025,12 @@ class TestMain:
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         # a run that failed before any results were saved can be rerun
-        _write_results(module, tmp_path.resolve(), "age", {"settings": {}})
+        _write_results(
+            module,
+            tmp_path.resolve(),
+            "age",
+            {"settings": {}, "folds": {"NODE_1__NODE_2": {"settings": {}}}},
+        )
         module.main([str(tmp_path), "--task", "age", "--no-cv"])
         mock_run_task.assert_called_once()
 
@@ -992,7 +1038,7 @@ class TestMain:
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
         _write_results(
-            module, tmp_path.resolve(), "age", {"results": {}}, date_tag="old"
+            module, tmp_path.resolve(), "age", RESULTS_WITH_FOLD, date_tag="old"
         )
         module.main([str(tmp_path), "--task", "age", "--no-cv"])
         mock_run_task.assert_called_once()
@@ -1000,7 +1046,7 @@ class TestMain:
     def test_overwrite(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
-        _write_results(module, tmp_path.resolve(), "age", {"results": {}})
+        _write_results(module, tmp_path.resolve(), "age", RESULTS_WITH_FOLD)
         module.main([str(tmp_path), "--task", "age", "--overwrite", "--no-cv"])
         mock_run_task.assert_called_once()
 
@@ -1020,14 +1066,23 @@ class TestMain:
         kwargs = calls[0]
         assert kwargs["training_nodes"] == ["NODE_2", "NODE_3"]
         assert kwargs["node_data_held_out"] == {"NODE_1": NODE_DATA["NODE_1"]}
-        assert kwargs["fpath_results"].stem.endswith("-heldout_NODE_1")
         assert kwargs["fpath_model"].stem.endswith("-heldout_NODE_1")
-        fpath_log = kwargs["fpath_results"].with_name(
-            kwargs["fpath_results"].name.replace("results-", "logs-")
-        )
-        assert fpath_log.with_suffix(".log").exists()
         assert kwargs["dpath_tensorboard"].name.endswith("-heldout_NODE_1")
-        assert kwargs["settings"]["cv"] is True
+        # one results file and one log file per task, with all the folds
+        dpath_date = tmp_path.resolve() / module.DEFAULT_DATE_TAG
+        for task in ["sex", "age"]:
+            fpath_results, json_data = _read_results(dpath_date / task)
+            assert fpath_results.name.endswith("-secagg-cv.json")
+            assert json_data["settings"]["runtime_args"]["cv"] is True
+            assert list(json_data["folds"]) == [
+                "NODE_2__NODE_3",
+                "NODE_1__NODE_3",
+                "NODE_1__NODE_2",
+            ]
+            assert all("results" in fold for fold in json_data["folds"].values())
+            assert [p.name for p in (dpath_date / task).glob("logs-*")] == [
+                fpath_results.name.replace("results-", "logs-").replace(".json", ".log")
+            ]
 
     def test_no_cv(
         self,
@@ -1082,10 +1137,8 @@ class TestMain:
         mock_get_node_data: MagicMock,
         tmp_path: Path,
     ):
-        _write_results(
-            module, tmp_path.resolve(), "age", {"results": {}}, held_out_node="NODE_2"
-        )
-        with pytest.raises(SystemExit, match="heldout_NODE_2"):
+        _write_results(module, tmp_path.resolve(), "age", RESULTS_WITH_FOLD, cv=True)
+        with pytest.raises(SystemExit, match="-cv.json"):
             module.main([str(tmp_path), "--task", "age"])
         mock_run_task.assert_not_called()
 
