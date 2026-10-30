@@ -5,11 +5,13 @@
 import argparse
 import importlib.util
 import json
+import logging
 import math
 import shutil
 import sys
-import warnings
 from collections import defaultdict
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -30,6 +32,8 @@ DPATH_TRAINING_PLANS = Path(__file__).resolve().parents[1] / "training_plans"
 PREFIX_MODEL = "model"
 PREFIX_RESULTS = "results"
 PREFIX_TENSORBOARD = "tensorboard"
+PREFIX_LOGS = "logs"
+
 COMMON_TAG = "brainflex"
 
 AGGREGATORS = ["fedavg", "fedprox", "scaffold"]
@@ -43,6 +47,13 @@ DEFAULT_AGGREGATOR = "scaffold"
 DEFAULT_FEDPROX_MU = 1.0
 DEFAULT_ALPHA = 0.1
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
+
+LOG_FORMAT_FILE = "%(asctime)s %(name)s %(levelname)s - %(message)s"
+LOG_FORMAT_SUMMARY = "%(levelname)s - %(message)s"
+
+logger = logging.getLogger("brainflex.run_experiments")
+logger.setLevel(logging.INFO)
+fbm_logger = logging.getLogger("fedbiomed")
 
 
 @dataclass(frozen=True)
@@ -270,6 +281,57 @@ def _save_json(fpath: Path, data: dict) -> None:
     )
 
 
+class _ListHandler(logging.Handler):
+    """Keep the formatted log messages in memory."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(self.format(record))
+
+
+def _filter_log_file_record(record: logging.LogRecord) -> bool:
+    """Keep all script messages but only the Fed-BioMed warnings and errors."""
+    if record.name == fbm_logger.name or record.name.startswith(f"{fbm_logger.name}."):
+        # keep security audit events even if they are below WARNING level
+        return record.levelno >= logging.WARNING and not getattr(
+            record, "is_security", False
+        )
+    return True
+
+
+@contextmanager
+def _log_to_file(fpath_log: Path) -> Generator[None, None, None]:
+    """Write the script messages and Fed-BioMed warnings/errors to a file."""
+    fpath_log.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(fpath_log, mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE))
+    handler.addFilter(_filter_log_file_record)
+    for logger_ in (logger, fbm_logger):
+        logger_.addHandler(handler)
+    try:
+        yield
+    finally:
+        for logger_ in (logger, fbm_logger):
+            logger_.removeHandler(handler)
+        handler.close()
+
+
+@contextmanager
+def _print_logger_messages_at_exit() -> Generator[None, None, None]:
+    """Print the script messages."""
+    handler = _ListHandler()
+    handler.setFormatter(logging.Formatter(LOG_FORMAT_SUMMARY))
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        print("\n".join(handler.messages))
+
+
 def _load_training_plan_class(module_name: str, class_name: str) -> type:
     spec = importlib.util.spec_from_file_location(
         f"training_plans.{module_name}",
@@ -323,10 +385,6 @@ def _get_feature_stats(
             columns.append(column)
 
     columns = sorted(columns)
-
-    if excluded_columns:
-        for reason, cols in excluded_columns.items():
-            print(f"Excluding {len(cols)} features ({reason}): {cols}")
 
     # cast to float so that the model args are JSON-serializable
     return (
@@ -473,6 +531,8 @@ def _run_task(
     """
     config = TASKS[task]
     is_cv = node_data_held_out is not None
+    if is_cv:
+        logger.info(f"[{task}] Holding out node {', '.join(node_data_held_out)}")
     exp = Experiment(
         tags=[COMMON_TAG, task],
         nodes=training_nodes,
@@ -502,23 +562,24 @@ def _run_task(
         exp.set_training_data(None, from_tags=True)
 
     if not is_cv:
-        warnings.warn(
-            "Feature z-scoring statistics are computed on all node data, including"
-            " the test data (data leakage). Use --cv to avoid this",
-            stacklevel=2,
+        logger.warning(
+            f"[{task}] Feature z-scoring statistics are computed on all node data,"
+            " including the test data (data leakage). Use --cv to avoid this"
         )
         if config.with_target_mean:
-            warnings.warn(
-                "The intercept is initialized with the target mean of all node data,"
-                " including the test data (data leakage). Use --cv to avoid this",
-                stacklevel=2,
+            logger.warning(
+                f"[{task}] The intercept is initialized with the target mean of all"
+                " node data, including the test data (data leakage). Use --cv to"
+                " avoid this"
             )
 
     # the training plan needs the feature stats to be instantiated
     columns, mean, std, excluded_columns, target_mean = _get_feature_stats(
         exp.analytics, exp.training_data().data(), config.target_column
     )
-    print(f"[{task}] Using {len(columns)} features")
+    for reason, cols in excluded_columns.items():
+        logger.info(f"[{task}] Excluding {len(cols)} features ({reason}): {cols}")
+    logger.info(f"[{task}] Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
     exp.set_training_plan_class(
@@ -548,7 +609,7 @@ def _run_task(
         )
 
     for round_ in range(1, n_rounds + 1):
-        print(f"[{task}] Round {round_}/{n_rounds}")
+        logger.info(f"[{task}] Round {round_}/{n_rounds}")
         if is_cv:
             _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         exp.run_once()
@@ -563,15 +624,15 @@ def _run_task(
         _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         json_data["results"]["node_metrics"] = exp.monitor()._metric_store
         _save_json(fpath_results, json_data)
-    print(f"[{task}] Saved settings and results to {fpath_results}")
+    logger.info(f"[{task}] Saved settings and results to {fpath_results}")
 
     if dpath_tensorboard is not None:
         _move_tensorboard_logs(exp, dpath_tensorboard)
-        print(f"[{task}] Saved TensorBoard logs to {dpath_tensorboard}")
+        logger.info(f"[{task}] Saved TensorBoard logs to {dpath_tensorboard}")
 
     fpath_model.parent.mkdir(parents=True, exist_ok=True)
     exp.training_plan().export_model(str(fpath_model))
-    print(f"[{task}] Saved global model to {fpath_model}")
+    logger.info(f"[{task}] Saved global model to {fpath_model}")
     return exp.training_plan()
 
 
@@ -644,53 +705,61 @@ def run_experiments(
             " Use --overwrite to overwrite them"
         )
 
-    for task, held_out_node in runs:
-        if held_out_node is None:
-            # use all nodes for training
-            training_nodes = None
-            node_data_held_out = None
-        else:
-            print(f"[{task}] Holding out node {held_out_node}")
-            training_nodes = sorted(set(node_data[task]) - {held_out_node})
-            node_data_held_out = {held_out_node: node_data[task][held_out_node]}
+    with _print_logger_messages_at_exit():
+        for task, held_out_node in runs:
+            if held_out_node is None:
+                # use all nodes for training
+                training_nodes = None
+                node_data_held_out = None
+            else:
+                training_nodes = sorted(set(node_data[task]) - {held_out_node})
+                node_data_held_out = {held_out_node: node_data[task][held_out_node]}
 
-        _run_task(
-            task=task,
-            n_rounds=n_rounds,
-            batch_size=batch_size,
-            n_updates=n_updates,
-            learning_rate=learning_rate,
-            test_ratio=test_ratio,
-            aggregator=aggregator,
-            fedprox_mu=fedprox_mu,
-            alpha=alpha,
-            settings=settings,
-            fpath_results=path_helper.get_fpath_out(
+            fpath_log = path_helper.get_fpath_out(
                 task=task,
-                prefix=PREFIX_RESULTS,
-                extension=".json",
+                prefix=PREFIX_LOGS,
+                extension=".log",
                 held_out_node=held_out_node,
-            ),
-            fpath_model=path_helper.get_fpath_out(
-                task=task,
-                prefix=PREFIX_MODEL,
-                extension=".pkl",
-                held_out_node=held_out_node,
-            ),
-            dpath_tensorboard=(
-                path_helper.get_fpath_out(
+            )
+            with _log_to_file(fpath_log):
+                _run_task(
                     task=task,
-                    prefix=PREFIX_TENSORBOARD,
-                    extension="",
-                    held_out_node=held_out_node,
+                    n_rounds=n_rounds,
+                    batch_size=batch_size,
+                    n_updates=n_updates,
+                    learning_rate=learning_rate,
+                    test_ratio=test_ratio,
+                    aggregator=aggregator,
+                    fedprox_mu=fedprox_mu,
+                    alpha=alpha,
+                    settings=settings,
+                    fpath_results=path_helper.get_fpath_out(
+                        task=task,
+                        prefix=PREFIX_RESULTS,
+                        extension=".json",
+                        held_out_node=held_out_node,
+                    ),
+                    fpath_model=path_helper.get_fpath_out(
+                        task=task,
+                        prefix=PREFIX_MODEL,
+                        extension=".pkl",
+                        held_out_node=held_out_node,
+                    ),
+                    dpath_tensorboard=(
+                        path_helper.get_fpath_out(
+                            task=task,
+                            prefix=PREFIX_TENSORBOARD,
+                            extension="",
+                            held_out_node=held_out_node,
+                        )
+                        if tensorboard
+                        else None
+                    ),
+                    training_nodes=training_nodes,
+                    node_data_held_out=node_data_held_out,
+                    secagg=secagg,
                 )
-                if tensorboard
-                else None
-            ),
-            training_nodes=training_nodes,
-            node_data_held_out=node_data_held_out,
-            secagg=secagg,
-        )
+            logger.info(f"[{task}] Saved log to {fpath_log}")
 
 
 def main(argv: list[str] | None = None) -> None:

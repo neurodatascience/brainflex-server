@@ -1,7 +1,7 @@
 import importlib.util
 import json
+import logging
 import sys
-import warnings
 from enum import Enum
 from pathlib import Path
 from types import ModuleType
@@ -516,28 +516,78 @@ class TestMoveTensorboardLogs:
         ]
 
 
+class TestLogToFile:
+    def test_log_to_file(self, module: ModuleType, tmp_path: Path):
+        fpath_log = tmp_path / "logs" / "logs.log"
+        fbm_logger = logging.getLogger("fedbiomed")
+        with module._log_to_file(fpath_log):
+            module.logger.info("script info")
+            module.logger.warning("script warning")
+            fbm_logger.info("fbm info")
+            fbm_logger.warning("fbm warning")
+            fbm_logger.error("fbm security", extra={"is_security": True})
+        lines = fpath_log.read_text().splitlines()
+        assert len(lines) == 3
+        assert lines[0].endswith("brainflex.run_experiments INFO - script info")
+        assert lines[1].endswith("brainflex.run_experiments WARNING - script warning")
+        assert lines[2].endswith("fedbiomed WARNING - fbm warning")
+
+    def test_handler_removed_on_error(self, module: ModuleType, tmp_path: Path):
+        fbm_logger = logging.getLogger("fedbiomed")
+        handlers_before = (list(module.logger.handlers), list(fbm_logger.handlers))
+        with pytest.raises(RuntimeError), module._log_to_file(tmp_path / "logs.log"):
+            raise RuntimeError
+        assert (list(module.logger.handlers), list(fbm_logger.handlers)) == (
+            handlers_before
+        )
+
+
+class TestPrintLoggerMessagesAtExit:
+    def test_print_logger_messages_at_exit(
+        self, module: ModuleType, capsys: pytest.CaptureFixture
+    ):
+        with module._print_logger_messages_at_exit():
+            module.logger.info("[age] first")
+            logging.getLogger("fedbiomed").warning("not printed")
+            assert capsys.readouterr().out == ""
+            module.logger.warning("[age] second")
+        assert capsys.readouterr().out == (
+            "INFO - [age] first\nWARNING - [age] second\n"
+        )
+        assert not any(
+            isinstance(handler, module._ListHandler)
+            for handler in module.logger.handlers
+        )
+
+    def test_printed_on_error(self, module: ModuleType, capsys: pytest.CaptureFixture):
+        with pytest.raises(RuntimeError), module._print_logger_messages_at_exit():
+            module.logger.info("[age] before error")
+            raise RuntimeError
+        assert capsys.readouterr().out == "INFO - [age] before error\n"
+
+
 class TestRunTask:
-    @pytest.mark.filterwarnings("ignore:.*data leakage")
     def test_run_task(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
         settings = {"n_rounds": 3}
         fpath_results = tmp_path / "age" / "results.json"
         fpath_model = tmp_path / "age" / "model.pkl"
-        module._run_task(
-            "age",
-            n_rounds=3,
-            batch_size=8,
-            n_updates=10,
-            learning_rate=0.1,
-            test_ratio=0.2,
-            aggregator="scaffold",
-            fedprox_mu=1.0,
-            alpha=0.1,
-            settings=settings,
-            fpath_results=fpath_results,
-            fpath_model=fpath_model,
-        )
+        with module._log_to_file(tmp_path / "logs.log"):
+            module._run_task(
+                "age",
+                n_rounds=3,
+                batch_size=8,
+                n_updates=10,
+                learning_rate=0.1,
+                test_ratio=0.2,
+                aggregator="scaffold",
+                fedprox_mu=1.0,
+                alpha=0.1,
+                settings=settings,
+                fpath_results=fpath_results,
+                fpath_model=fpath_model,
+            )
 
         assert mock_experiment.call_args.kwargs["tags"] == ["brainflex", "age"]
         assert mock_experiment.call_args.kwargs["round_limit"] == 3
@@ -564,6 +614,7 @@ class TestRunTask:
             exp.set_training_plan_class.call_args.args[0].__name__
             == "TabularRegressorTrainingPlan"
         )
+        assert "[age] Using 3 features" in (tmp_path / "logs.log").read_text()
 
         json_data = json.loads(fpath_results.read_text())
         assert json_data["settings"]["runtime_args"] == settings
@@ -587,7 +638,6 @@ class TestRunTask:
             )
         )
 
-    @pytest.mark.filterwarnings("ignore:.*data leakage")
     def test_settings_saved_if_training_fails(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
@@ -613,7 +663,6 @@ class TestRunTask:
         assert mock_experiment.call_args.kwargs["agg_optimizer"] is None
         assert "results" not in json_data
 
-    @pytest.mark.filterwarnings("ignore:.*data leakage")
     def test_tensorboard(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
@@ -636,7 +685,6 @@ class TestRunTask:
         assert mock_experiment.call_args.kwargs["tensorboard"] is True
         assert (dpath_tensorboard / "NODE_2").is_dir()
 
-    @pytest.mark.filterwarnings("ignore:.*data leakage")
     def test_no_secagg(
         self,
         module: ModuleType,
@@ -678,10 +726,11 @@ class TestRunTask:
         mock_experiment: MagicMock,
         mock_evaluate_held_out: MagicMock,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
         task: str,
         n_warnings: int,
     ):
-        with pytest.warns(UserWarning, match="data leakage") as record:
+        with module._log_to_file(tmp_path / "logs.log"):
             module._run_task(
                 task,
                 n_rounds=1,
@@ -696,7 +745,12 @@ class TestRunTask:
                 fpath_results=tmp_path / "results.json",
                 fpath_model=tmp_path / "model.pkl",
             )
-        assert len(record) == n_warnings
+        assert [
+            record.levelno
+            for record in caplog.records
+            if "data leakage" in record.getMessage()
+        ] == [logging.WARNING] * n_warnings
+        assert "data leakage" in (tmp_path / "logs.log").read_text()
         assert mock_experiment.call_args.kwargs["nodes"] is None
         mock_experiment.return_value.set_training_data.assert_not_called()
         training_args = mock_experiment.call_args.kwargs["training_args"]
@@ -710,27 +764,26 @@ class TestRunTask:
         mock_evaluate_held_out: MagicMock,
         mock_setup_held_out_secagg: MagicMock,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ):
         fpath_results = tmp_path / "results.json"
         node_data_held_out = {"NODE_3": NODE_DATA["NODE_3"]}
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            module._run_task(
-                "age",
-                n_rounds=3,
-                batch_size=8,
-                n_updates=10,
-                learning_rate=0.1,
-                test_ratio=0.2,
-                aggregator="scaffold",
-                fedprox_mu=1.0,
-                alpha=0.1,
-                settings={},
-                fpath_results=fpath_results,
-                fpath_model=tmp_path / "model.pkl",
-                training_nodes=["NODE_1", "NODE_2"],
-                node_data_held_out=node_data_held_out,
-            )
+        module._run_task(
+            "age",
+            n_rounds=3,
+            batch_size=8,
+            n_updates=10,
+            learning_rate=0.1,
+            test_ratio=0.2,
+            aggregator="scaffold",
+            fedprox_mu=1.0,
+            alpha=0.1,
+            settings={},
+            fpath_results=fpath_results,
+            fpath_model=tmp_path / "model.pkl",
+            training_nodes=["NODE_1", "NODE_2"],
+            node_data_held_out=node_data_held_out,
+        )
         assert mock_experiment.call_args.kwargs["nodes"] == ["NODE_1", "NODE_2"]
         mock_experiment.return_value.set_training_data.assert_called_once_with(
             None, from_tags=True
@@ -751,6 +804,8 @@ class TestRunTask:
         assert json_data["settings"]["training_nodes"] == ["NODE_1", "NODE_2"]
         assert json_data["settings"]["held_out_node"] == node_data_held_out
         assert "node_metrics" in json_data["results"]
+        assert not any("data leakage" in r.getMessage() for r in caplog.records)
+        assert "[age] Holding out node NODE_3" in caplog.messages
 
 
 def _write_results(
@@ -804,6 +859,13 @@ class TestMain:
         assert kwargs["fpath_results"].name.startswith("results-scaffold-2rounds-")
         assert kwargs["fpath_model"].name.startswith("model-scaffold-2rounds-")
         assert kwargs["fpath_model"].suffix == ".pkl"
+        # created by _log_to_file even though _run_task is mocked
+        fpath_log = (
+            dpath_date
+            / "age"
+            / kwargs["fpath_results"].name.replace("results-", "logs-")
+        )
+        assert fpath_log.with_suffix(".log").exists()
         assert kwargs["dpath_tensorboard"].parent == dpath_date / "age"
         assert kwargs["dpath_tensorboard"].name.startswith(
             "tensorboard-scaffold-2rounds-"
@@ -818,6 +880,28 @@ class TestMain:
         assert settings["tensorboard"] is True
         assert settings["secagg"] is True
         assert kwargs["secagg"] is True
+
+    def test_messages_printed_at_end(
+        self,
+        module: ModuleType,
+        mock_run_task: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+    ):
+        def run_task(task: str, **kwargs):
+            module.logger.info(f"[{task}] done")
+            assert capsys.readouterr().out == ""
+            if task == "age":
+                raise RuntimeError
+
+        mock_run_task.side_effect = run_task
+        with pytest.raises(RuntimeError):
+            module.main([str(tmp_path), "--task", "sex", "--task", "age", "--no-cv"])
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0] == "INFO - [sex] done"
+        assert lines[1].startswith("INFO - [sex] Saved log to ")
+        # no "Saved log" message for the failed run
+        assert lines[2:] == ["INFO - [age] done"]
 
     def test_date_tag(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
@@ -915,6 +999,10 @@ class TestMain:
         assert kwargs["node_data_held_out"] == {"NODE_1": NODE_DATA["NODE_1"]}
         assert kwargs["fpath_results"].stem.endswith("-heldout_NODE_1")
         assert kwargs["fpath_model"].stem.endswith("-heldout_NODE_1")
+        fpath_log = kwargs["fpath_results"].with_name(
+            kwargs["fpath_results"].name.replace("results-", "logs-")
+        )
+        assert fpath_log.with_suffix(".log").exists()
         assert kwargs["dpath_tensorboard"].name.endswith("-heldout_NODE_1")
         assert kwargs["settings"]["cv"] is True
 
