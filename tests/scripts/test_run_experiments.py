@@ -696,6 +696,7 @@ class TestRunTask:
             )
         assert len(record) == n_warnings
         assert mock_experiment.call_args.kwargs["nodes"] is None
+        mock_experiment.return_value.set_training_data.assert_not_called()
         training_args = mock_experiment.call_args.kwargs["training_args"]
         assert training_args["shuffle_testing_dataset"] is False
         mock_evaluate_held_out.assert_not_called()
@@ -729,6 +730,9 @@ class TestRunTask:
                 node_data_held_out=node_data_held_out,
             )
         assert mock_experiment.call_args.kwargs["nodes"] == ["NODE_1", "NODE_2"]
+        mock_experiment.return_value.set_training_data.assert_called_once_with(
+            None, from_tags=True
+        )
         training_args = mock_experiment.call_args.kwargs["training_args"]
         assert training_args["shuffle_testing_dataset"] is True
         exp = mock_experiment.return_value

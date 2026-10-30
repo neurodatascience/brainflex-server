@@ -485,6 +485,10 @@ def _run_task(
             active=secagg, clipping_range=config.secagg_clipping_range
         ),
     )
+    if training_nodes is not None:
+        # redo the search to drop the held-out node
+        # otherwise, it would be included in the federated analytics
+        exp.set_training_data(None, from_tags=True)
 
     if not is_cv:
         warnings.warn(
