@@ -38,6 +38,7 @@ COMMON_TAG = "brainflex"
 
 AGGREGATORS = ["fedavg", "fedprox", "scaffold"]
 
+DEFAULT_TASKS = ["age", "sex"]
 DEFAULT_N_ROUNDS = 30
 DEFAULT_BATCH_SIZE = 1000  # full batch
 DEFAULT_N_UPDATES = 50
@@ -46,12 +47,15 @@ DEFAULT_TEST_RATIO = 0.1
 DEFAULT_AGGREGATOR = "scaffold"
 DEFAULT_FEDPROX_MU = 1.0
 DEFAULT_ALPHA = 0.1
+DEFAULT_TENSORBOARD = True
+DEFAULT_SECAGG = True
+DEFAULT_CV = True
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
 
 LOG_FORMAT_FILE = "%(asctime)s %(name)s %(levelname)s - %(message)s"
 LOG_FORMAT_SUMMARY = "%(levelname)s - %(message)s"
 
-logger = logging.getLogger("brainflex.run_experiments")
+logger = logging.getLogger("brainflex")
 logger.setLevel(logging.INFO)
 fbm_logger = logging.getLogger("fedbiomed")
 
@@ -81,6 +85,8 @@ class PathHelper:
     test_ratio: float
     aggregator: str
     alpha: float
+    secagg: bool
+    cv: bool
 
     def get_fpath_out(
         self,
@@ -92,13 +98,19 @@ class PathHelper:
         stem = "-".join(
             [
                 prefix,
-                self.aggregator,
+                (
+                    self.aggregator
+                    if self.aggregator != "fedprox"
+                    else f"{self.aggregator}_{DEFAULT_FEDPROX_MU}mu"
+                ),
                 f"{self.n_rounds}rounds",
                 f"{self.n_updates}updates",
                 f"{self.batch_size}",
                 f"{self.learning_rate}lr",
                 f"{self.test_ratio}test",
                 f"{self.alpha}alpha",
+                "secagg" if self.secagg else "no_secagg",
+                "cv" if self.cv else "no_cv",
             ]
         )
         if held_out_node is not None:
@@ -142,7 +154,6 @@ def _get_parser() -> argparse.ArgumentParser:
         "--task",
         dest="tasks",
         action="append",
-        required=True,
         choices=list(TASKS),
         help="Task to run. Can be repeated.",
     )
@@ -195,33 +206,33 @@ def _get_parser() -> argparse.ArgumentParser:
         help=f"L2 regularization strength. Default: {DEFAULT_ALPHA}.",
     )
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing results.",
-    )
-    parser.add_argument(
         "--tensorboard",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Save node metrics as TensorBoard logs. Default: True.",
+        default=DEFAULT_TENSORBOARD,
+        help=f"Save node metrics as TensorBoard logs. Default: {DEFAULT_TENSORBOARD}.",
     )
     parser.add_argument(
         "--secagg",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=DEFAULT_SECAGG,
         help=(
             "Secure aggregation of the model parameters and the feature statistics."
-            " Needs at least 2 training nodes. Default: True."
+            f" Needs at least 2 training nodes. Default: {DEFAULT_SECAGG}."
         ),
     )
     parser.add_argument(
         "--cv",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=DEFAULT_CV,
         help=(
             "Leave-one-node-out cross-validation: train on all nodes but one and"
-            " evaluate on the held-out node. Default: True."
+            f" evaluate on the held-out node. Default: {DEFAULT_CV}."
         ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing results.",
     )
     return parser
 
@@ -685,6 +696,8 @@ def run_experiments(
         test_ratio=test_ratio,
         aggregator=aggregator,
         alpha=alpha,
+        secagg=secagg,
+        cv=cv,
     )
 
     # error out if one of the result files already exists
@@ -767,7 +780,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         run_experiments(
             args.output_dir,
-            args.tasks,
+            args.tasks if args.tasks is not None else DEFAULT_TASKS,
             date_tag=args.date_tag,
             n_rounds=args.n_rounds,
             batch_size=args.batch_size,
