@@ -7,10 +7,15 @@ from fedbiomed.common.datamanager import DataManager
 from fedbiomed.common.dataset import TabularDataset
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_plans import FedSGDClassifier
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
 
 
 class TabularClassifierTrainingPlan(FedSGDClassifier):
     """Predict an integer-encoded class column from standardized feature columns."""
+
+    # allows metrics
+    METRICS = ("ACCURACY", "BALANCED_ACCURACY", "AUROC")
+    DEFAULT_METRICS = ("ACCURACY",)
 
     def init_dependencies(self):
         return [
@@ -20,6 +25,7 @@ class TabularClassifierTrainingPlan(FedSGDClassifier):
             "from fedbiomed.common.optimizers.optimizer import Optimizer",
             "from declearn.optimizer.modules import ScaffoldClientModule",
             "from declearn.optimizer.regularizers import FedProxRegularizer",
+            "from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score",
         ]
 
     def init_optimizer(self, optimizer_args):
@@ -36,6 +42,14 @@ class TabularClassifierTrainingPlan(FedSGDClassifier):
         return Optimizer(
             lr=optimizer_args["lr"], modules=modules, regularizers=regularizers
         )
+
+    def post_init(self, model_args, training_args, *args, **kwargs):
+        super().post_init(model_args, training_args, *args, **kwargs)
+        unknown = set(model_args.get("metrics", [])) - set(self.METRICS)
+        if unknown:
+            raise ValueError(
+                f"Unknown metrics {sorted(unknown)}. Allowed metrics: {list(self.METRICS)}"
+            )
 
     def set_data_loaders(self, train_data_loader, test_data_loader):
         if train_data_loader is None:
@@ -63,3 +77,18 @@ class TabularClassifierTrainingPlan(FedSGDClassifier):
             transform=lambda x: (x - mean) / std,
         )
         return DataManager(dataset=dataset, shuffle=True)
+
+    def testing_step(self, data, target):
+        target = np.ravel(target)
+        prediction = self.model().predict(data)
+        metrics = {
+            "ACCURACY": accuracy_score(target, prediction),
+            "BALANCED_ACCURACY": balanced_accuracy_score(target, prediction),
+            "AUROC": roc_auc_score(target, self.model().decision_function(data)),
+        }
+        # NaN cannot be saved in the results JSON
+        return {
+            name: metrics[name]
+            for name in self.model_args().get("metrics", self.DEFAULT_METRICS)
+            if not np.isnan(metrics[name])
+        }

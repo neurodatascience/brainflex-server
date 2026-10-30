@@ -13,7 +13,7 @@ from fedbiomed.researcher.federated_workflows.jobs import (
 )
 
 # importable because the script's directory is the first entry of sys.path
-from run_experiments import COMMON_TAG, TASKS, _load_training_plan_class
+from run_experiments import COMMON_TAG, TASKS
 
 # Fed-BioMed-defined status of a training plan that a node doesn't know
 TRAINING_PLAN_NOT_REGISTERED = "Not Registered"
@@ -43,9 +43,7 @@ def _request_approval(task: str) -> dict[str, str]:
     nodes = fds.node_ids() if fds is not None else []
     if not nodes:
         raise ValueError(f"No node has a dataset for {task}")
-    training_plan = _load_training_plan_class(
-        config.training_plan_module, config.training_plan_class
-    )()
+    training_plan = config.training_plan_class()
 
     replies = TrainingPlanCheckJob(
         researcher_id=exp.researcher_id,
@@ -77,7 +75,7 @@ def _request_approval(task: str) -> dict[str, str]:
             requests=exp.requests,
             nodes=nodes_not_registered,
             training_plan=training_plan,
-            description=f"{COMMON_TAG} {task}: {config.training_plan_class}",
+            description=f"{COMMON_TAG} {task}: {config.training_plan_class.__name__}",
         ).execute()
         for node in nodes_not_registered:
             not_approved[node] = STATUS_SENT

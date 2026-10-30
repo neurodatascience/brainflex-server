@@ -17,7 +17,6 @@ from pathlib import Path
 
 import numpy as np
 from declearn.optimizer.modules import ScaffoldServerModule
-from fedbiomed.common.metrics import MetricTypes
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_args import TrainingArgs
 from fedbiomed.common.training_plans import BaseTrainingPlan
@@ -45,12 +44,24 @@ DEFAULT_ALPHA = 0.1
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
 
 
+def _load_training_plan_class(
+    module_name: str, class_name: str
+) -> type[BaseTrainingPlan]:
+    spec = importlib.util.spec_from_file_location(
+        f"training_plans.{module_name}",
+        DPATH_TRAINING_PLANS / f"{module_name}.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    # registered so that Fed-BioMed can get the source code to send to nodes
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return getattr(module, class_name)
+
+
 @dataclass(frozen=True)
 class TaskConfig:
-    training_plan_module: str
-    training_plan_class: str
+    training_plan_class: type[BaseTrainingPlan]
     target_column: str
-    test_metric: MetricTypes
     # whether the model intercept is initialized to the global target mean
     with_target_mean: bool = False
     extra_model_args: dict = field(default_factory=dict)
@@ -97,18 +108,18 @@ class PathHelper:
 
 TASKS = {
     "age": TaskConfig(
-        training_plan_module="tabular_regressor",
-        training_plan_class="TabularRegressorTrainingPlan",
+        training_plan_class=_load_training_plan_class(
+            "tabular_regressor", "TabularRegressorTrainingPlan"
+        ),
         target_column="nb:Age",
-        test_metric=MetricTypes.MEAN_SQUARE_ERROR,
         with_target_mean=True,
         secagg_clipping_range=100,
     ),
     "sex": TaskConfig(
-        training_plan_module="tabular_classifier",
-        training_plan_class="TabularClassifierTrainingPlan",
+        training_plan_class=_load_training_plan_class(
+            "tabular_classifier", "TabularClassifierTrainingPlan"
+        ),
         target_column="nb:Sex",
-        test_metric=MetricTypes.ACCURACY,
         extra_model_args={"n_classes": 2},
     ),
 }
@@ -270,18 +281,6 @@ def _save_json(fpath: Path, data: dict) -> None:
     )
 
 
-def _load_training_plan_class(module_name: str, class_name: str) -> type:
-    spec = importlib.util.spec_from_file_location(
-        f"training_plans.{module_name}",
-        DPATH_TRAINING_PLANS / f"{module_name}.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    # registered so that Fed-BioMed can get the source code to send to nodes
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return getattr(module, class_name)
-
-
 def _get_node_data(task: str) -> dict[str, dict]:
     """Get the dataset metadata of each node that has data for a task."""
     fds = Experiment(tags=[COMMON_TAG, task]).training_data()
@@ -354,6 +353,8 @@ def _build_model_args(
         "feature_std": std,
         "target_column": config.target_column,
         "alpha": alpha,
+        # all the metrics supported by the training plan
+        "metrics": list(config.training_plan_class.METRICS),
         **config.extra_model_args,
     }
     if config.with_target_mean:
@@ -480,7 +481,6 @@ def _run_task(
             "loader_args": {"batch_size": batch_size},
             "num_updates": n_updates,
             "test_ratio": test_ratio,
-            "test_metric": config.test_metric,
             "test_on_global_updates": True,
             "test_on_local_updates": True,
             "optimizer_args": _build_optimizer_args(
@@ -521,11 +521,7 @@ def _run_task(
     print(f"[{task}] Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
-    exp.set_training_plan_class(
-        _load_training_plan_class(
-            config.training_plan_module, config.training_plan_class
-        )
-    )
+    exp.set_training_plan_class(config.training_plan_class)
 
     # saved before training so that they are available even if training fails
     json_data = {

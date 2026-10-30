@@ -93,7 +93,7 @@ class TestRequestApproval:
         assert kwargs["nodes"] == NODES
         training_plan = kwargs["training_plan"]
         assert isinstance(training_plan, BaseTrainingPlan)
-        assert type(training_plan).__name__ == module.TASKS[task].training_plan_class
+        assert type(training_plan) is module.TASKS[task].training_plan_class
         mock_approve_job.assert_not_called()
 
     def test_not_approved(
