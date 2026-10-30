@@ -81,6 +81,8 @@ services:
       - FBM_RESEARCHER_COMPONENT_ROOT=/fbm-researcher
       # address of the researcher on the VPN
       - FBM_SERVER_HOST=10.222.0.2
+      # timezone, used e.g. for the date subfolder of the experiment results
+      - TZ=${TZ:-UTC}
     volumes:
       - ./fbm-researcher:/fbm-researcher # contains fedbiomed component configuration and data
       # brainflex training plans and experiment script
