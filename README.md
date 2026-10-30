@@ -96,7 +96,7 @@ The nodes must first approve the training plans. Send them to the nodes with:
 docker compose exec -u fedbiomed researcher python /brainflex-server/scripts/request_training_plan_approval.py
 ```
 
-Each site then approves them on its node with `fedbiomed node -p /fbm-node training-plan approve`. Run the script again to check that all nodes have approved them.
+Each site then approves them on its node with `docker compose exec -u fedbiomed node fedbiomed node -p /fbm-node training-plan approve`. Run the script again to check that all nodes have approved them.
 
 The experiment script can be invoked via e.g.:
 
