@@ -7,6 +7,7 @@ import importlib.util
 import json
 import logging
 import math
+import re
 import shutil
 import sys
 from collections import defaultdict
@@ -51,8 +52,9 @@ DEFAULT_SECAGG = True
 DEFAULT_CV = True
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
 
-LOG_FORMAT_FILE = "%(asctime)s %(name)s %(levelname)s - %(message)s"
-LOG_FORMAT_SUMMARY = "%(levelname)s - %(message)s"
+LOG_FORMAT_FILE = "%(asctime)s %(name)s %(levelname)-8s - %(message)s"
+LOG_FORMAT_SUMMARY = "%(levelname)-8s - %(message)s"
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")  # terminal formatting codes
 
 logger = logging.getLogger("brainflex")
 logger.setLevel(logging.INFO)
@@ -303,13 +305,28 @@ class _ListHandler(logging.Handler):
         self.messages.append(self.format(record))
 
 
+class _StripAnsiFormatter(logging.Formatter):
+    """Remove the terminal formatting codes."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return ANSI_ESCAPE.sub("", super().format(record))
+
+
+def _get_node_log_level(record: logging.LogRecord) -> int | None:
+    """Get the original level of a node log message forwarded to the researcher."""
+    if record.funcName != "print_node_log_message":
+        return None
+    level_name = ANSI_ESCAPE.sub("", record.getMessage().split("\n", 1)[0]).strip()
+    level = logging.getLevelName(level_name)
+    return level if isinstance(level, int) else None
+
+
 def _filter_log_file_record(record: logging.LogRecord) -> bool:
     """Keep all script messages but only the Fed-BioMed warnings and errors."""
     if record.name == fbm_logger.name or record.name.startswith(f"{fbm_logger.name}."):
-        # keep security audit events even if they are below WARNING level
-        return record.levelno >= logging.WARNING and not getattr(
-            record, "is_security", False
-        )
+        level = _get_node_log_level(record) or record.levelno
+        # security audit events are excluded from Fed-BioMed's console handler too
+        return level >= logging.WARNING and not getattr(record, "is_security", False)
     return True
 
 
@@ -318,7 +335,7 @@ def _log_to_file(fpath_log: Path) -> Generator[None, None, None]:
     """Write the script messages and Fed-BioMed warnings/errors to a file."""
     fpath_log.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(fpath_log, mode="w", encoding="utf-8")
-    handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE))
+    handler.setFormatter(_StripAnsiFormatter(LOG_FORMAT_FILE))
     handler.addFilter(_filter_log_file_record)
     for logger_ in (logger, fbm_logger):
         logger_.addHandler(handler)
@@ -341,12 +358,6 @@ def _print_logger_messages_at_exit() -> Generator[None, None, None]:
     finally:
         logger.removeHandler(handler)
         print("\n".join(handler.messages))
-
-
-def _get_log_prefix(task: str, held_out_node: str | None = None) -> str:
-    if held_out_node is None:
-        return f"[{task}]"
-    return f"[{task}|held_out={held_out_node}]"
 
 
 def _load_training_plan_class(module_name: str, class_name: str) -> type:
@@ -550,9 +561,10 @@ def _run_task(
     config = TASKS[task]
     is_cv = node_data_held_out is not None
     held_out_node = next(iter(node_data_held_out)) if is_cv else None
-    prefix = _get_log_prefix(task, held_out_node)
+    section_name = task.upper()
     if is_cv:
-        logger.info(f"{prefix} Holding out node {held_out_node}")
+        section_name += f": held_out_node={held_out_node}"
+    logger.info(f"===== {section_name} =====")
     exp = Experiment(
         tags=[COMMON_TAG, task],
         nodes=training_nodes,
@@ -584,12 +596,12 @@ def _run_task(
 
     if not is_cv:
         logger.warning(
-            f"{prefix} Feature z-scoring statistics are computed on all node data,"
+            "Feature z-scoring statistics are computed on all node data,"
             " including the test data (data leakage). Use --cv to avoid this"
         )
         if config.with_target_mean:
             logger.warning(
-                f"{prefix} The intercept is initialized with the target mean of all"
+                "The intercept is initialized with the target mean of all"
                 " node data, including the test data (data leakage). Use --cv to"
                 " avoid this"
             )
@@ -599,8 +611,8 @@ def _run_task(
         exp.analytics, exp.training_data().data(), config.target_column
     )
     for reason, cols in excluded_columns.items():
-        logger.info(f"{prefix} Excluding {len(cols)} features ({reason}): {cols}")
-    logger.info(f"{prefix} Using {len(columns)} features")
+        logger.info(f"Excluding {len(cols)} features ({reason}): {cols}")
+    logger.info(f"Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
     exp.set_training_plan_class(
@@ -628,7 +640,7 @@ def _run_task(
         )
 
     for round_ in range(1, n_rounds + 1):
-        logger.info(f"{prefix} Round {round_}/{n_rounds}")
+        logger.info(f"Round {round_}/{n_rounds}")
         if is_cv:
             _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         exp.run_once()
@@ -646,11 +658,11 @@ def _run_task(
 
     if dpath_tensorboard is not None:
         _move_tensorboard_logs(exp, dpath_tensorboard)
-        logger.info(f"{prefix} Saved TensorBoard logs to {dpath_tensorboard}")
+        logger.info(f"Saved TensorBoard logs to {dpath_tensorboard}")
 
     fpath_model.parent.mkdir(parents=True, exist_ok=True)
     exp.training_plan().export_model(str(fpath_model))
-    logger.info(f"{prefix} Saved global model to {fpath_model}")
+    logger.info(f"Saved global model to {fpath_model}")
 
 
 def run_experiments(
@@ -779,11 +791,8 @@ def run_experiments(
                     ):
                         json_data["folds"][fold_key] = fold
                         _save_json(fpath_results, json_data)
-                    logger.info(
-                        f"{_get_log_prefix(task, held_out_node)} Saved settings and"
-                        f" results to {fpath_results}"
-                    )
-            logger.info(f"[{task}] Saved log to {fpath_log}")
+                    logger.info(f"Saved settings and results to {fpath_results}")
+            logger.info(f"Saved log to {fpath_log}")
 
 
 def main(argv: list[str] | None = None) -> None:

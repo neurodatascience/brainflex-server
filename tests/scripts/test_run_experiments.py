@@ -557,9 +557,40 @@ class TestLogToFile:
             fbm_logger.error("fbm security", extra={"is_security": True})
         lines = fpath_log.read_text().splitlines()
         assert len(lines) == 3
-        assert lines[0].endswith("brainflex INFO - script info")
-        assert lines[1].endswith("brainflex WARNING - script warning")
-        assert lines[2].endswith("fedbiomed WARNING - fbm warning")
+        assert lines[0].endswith("brainflex INFO     - script info")
+        assert lines[1].endswith("brainflex WARNING  - script warning")
+        assert lines[2].endswith("fedbiomed WARNING  - fbm warning")
+
+    @pytest.mark.parametrize(
+        ("node_level", "kept"), [("WARNING", True), ("ERROR", True), ("INFO", False)]
+    )
+    def test_node_log_message(
+        self, module: ModuleType, tmp_path: Path, node_level: str, kept: bool
+    ):
+        fpath_log = tmp_path / "logs.log"
+
+        # same name and message format as in Fed-BioMed's Requests class
+        def print_node_log_message() -> None:
+            logging.getLogger("fedbiomed").info(
+                f"\033[1m{node_level}\033[0m\n"
+                "\t\t\t\t\t\033[1m NODE\033[0m NODE_1\n"
+                "\t\t\t\t\t\033[1m MESSAGE:\033[0m node message\033[0m\n"
+            )
+
+        with module._log_to_file(fpath_log):
+            print_node_log_message()
+        text = fpath_log.read_text()
+        assert ("node message" in text) is kept
+        if kept:
+            assert f"fedbiomed INFO     - {node_level}\n" in text
+            assert "\033" not in text
+
+    def test_info_not_from_node(self, module: ModuleType, tmp_path: Path):
+        # the first line is only parsed for messages forwarded from the nodes
+        fpath_log = tmp_path / "logs.log"
+        with module._log_to_file(fpath_log):
+            logging.getLogger("fedbiomed").info("WARNING\nnot from a node")
+        assert fpath_log.read_text() == ""
 
     def test_handler_removed_on_error(self, module: ModuleType, tmp_path: Path):
         fbm_logger = logging.getLogger("fedbiomed")
@@ -581,7 +612,7 @@ class TestPrintLoggerMessagesAtExit:
             assert capsys.readouterr().out == ""
             module.logger.warning("[age] second")
         assert capsys.readouterr().out == (
-            "INFO - [age] first\nWARNING - [age] second\n"
+            "INFO     - [age] first\nWARNING  - [age] second\n"
         )
         assert not any(
             isinstance(handler, module._ListHandler)
@@ -592,7 +623,7 @@ class TestPrintLoggerMessagesAtExit:
         with pytest.raises(RuntimeError), module._print_logger_messages_at_exit():
             module.logger.info("[age] before error")
             raise RuntimeError
-        assert capsys.readouterr().out == "INFO - [age] before error\n"
+        assert capsys.readouterr().out == "INFO     - [age] before error\n"
 
 
 class TestRunTask:
@@ -641,7 +672,9 @@ class TestRunTask:
             exp.set_training_plan_class.call_args.args[0].__name__
             == "TabularRegressorTrainingPlan"
         )
-        assert "[age] Using 3 features" in (tmp_path / "logs.log").read_text()
+        log_text = (tmp_path / "logs.log").read_text()
+        assert "INFO     - ===== AGE =====" in log_text
+        assert "INFO     - Using 3 features" in log_text
 
         # before training and after each round
         assert len(folds) == 4
@@ -841,8 +874,7 @@ class TestRunTask:
         assert fold["settings"]["held_out_node"] == node_data_held_out
         assert "node_metrics" in fold["results"]
         assert not any("data leakage" in r.getMessage() for r in caplog.records)
-        assert "[age|held_out=NODE_3] Holding out node NODE_3" in caplog.messages
-        assert "[age|held_out=NODE_3] Round 1/3" in caplog.messages
+        assert "===== AGE: held_out=NODE_3 =====" in caplog.messages
 
 
 def _read_results(dpath_task: Path) -> tuple[Path, dict]:
@@ -953,11 +985,11 @@ class TestMain:
         with pytest.raises(RuntimeError):
             module.main([str(tmp_path), "--task", "sex", "--task", "age", "--no-cv"])
         lines = capsys.readouterr().out.splitlines()
-        assert lines[0] == "INFO - [sex] done"
-        assert lines[1].startswith("INFO - [sex] Saved settings and results to ")
-        assert lines[2].startswith("INFO - [sex] Saved log to ")
+        assert lines[0] == "INFO     - [sex] done"
+        assert lines[1].startswith("INFO     - Saved settings and results to ")
+        assert lines[2].startswith("INFO     - Saved log to ")
         # no "Saved" messages for the failed run
-        assert lines[3:] == ["INFO - [age] done"]
+        assert lines[3:] == ["INFO     - [age] done"]
 
     def test_date_tag(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
