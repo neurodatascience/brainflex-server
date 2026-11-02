@@ -3,38 +3,32 @@
 """Run the federated learning experiments."""
 
 import argparse
-import importlib.util
 import json
-import logging
 import math
-import re
 import shutil
 import sys
 from collections import defaultdict
 from collections.abc import Generator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import date
-from enum import Enum
 from pathlib import Path
 
-import numpy as np
+from _io_utils import (
+    PREFIX_LOGS,
+    PREFIX_MODEL,
+    PREFIX_RESULTS,
+    PREFIX_TENSORBOARD,
+    PathHelper,
+    save_json,
+)
+from _log_utils import log_to_file, logger, print_logger_messages_at_exit
+from _tasks import COMMON_TAG, TASKS, filter_feature_col, load_training_plan_class
 from declearn.optimizer.modules import ScaffoldServerModule
-from fedbiomed.common.metrics import MetricTypes
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_args import TrainingArgs
 from fedbiomed.researcher.datasets import FederatedDataset
 from fedbiomed.researcher.federated_workflows import Experiment, FederatedAnalytics
 from fedbiomed.researcher.federated_workflows.jobs import TrainingJob
 from fedbiomed.researcher.secagg import SecureAggregation
-
-DPATH_TRAINING_PLANS = Path(__file__).resolve().parents[1] / "training_plans"
-PREFIX_MODEL = "model"
-PREFIX_RESULTS = "results"
-PREFIX_TENSORBOARD = "tensorboard"
-PREFIX_LOGS = "logs"
-
-COMMON_TAG = "brainflex"
 
 AGGREGATORS = ["fedavg", "fedprox", "scaffold"]
 
@@ -51,92 +45,6 @@ DEFAULT_TENSORBOARD = True
 DEFAULT_SECAGG = True
 DEFAULT_CV = True
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
-
-LOG_FORMAT_FILE = "%(asctime)s %(name)s %(levelname)-8s - %(message)s"
-LOG_FORMAT_SUMMARY = "%(levelname)-8s - %(message)s"
-ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")  # terminal formatting codes
-
-logger = logging.getLogger("brainflex")
-logger.setLevel(logging.INFO)
-fbm_logger = logging.getLogger("fedbiomed")
-
-
-@dataclass(frozen=True)
-class TaskConfig:
-    training_plan_module: str
-    training_plan_class: str
-    target_column: str
-    test_metric: MetricTypes
-    # whether the model intercept is initialized to the global target mean
-    with_target_mean: bool = False
-    extra_model_args: dict = field(default_factory=dict)
-    # model parameters are clipped to [-x, x] before being encrypted for secure
-    # aggregation
-    secagg_clipping_range: int | None = None
-
-
-@dataclass(frozen=True)
-class PathHelper:
-    output_dir: Path
-    date_tag: str
-    n_rounds: int
-    batch_size: int
-    n_updates: int
-    learning_rate: float
-    test_ratio: float
-    aggregator: str
-    fedprox_mu: float
-    alpha: float
-    secagg: bool
-    cv: bool
-
-    def get_fpath_out(
-        self,
-        task: str,
-        prefix: str,
-        extension: str = ".json",
-        held_out_node: str | None = None,
-    ) -> Path:
-        stem = "-".join(
-            [
-                prefix,
-                (
-                    self.aggregator
-                    if self.aggregator != "fedprox"
-                    else f"{self.aggregator}_{self.fedprox_mu}mu"
-                ),
-                f"{self.n_rounds}rounds",
-                f"{self.n_updates}updates",
-                f"{self.batch_size}",
-                f"{self.learning_rate}lr",
-                f"{self.test_ratio}test",
-                f"{self.alpha}alpha",
-                "secagg" if self.secagg else "no_secagg",
-                "cv" if self.cv else "no_cv",
-            ]
-        )
-        if held_out_node is not None:
-            stem = f"{stem}-heldout_{held_out_node}"
-        return self.output_dir / self.date_tag / task / f"{stem}{extension}"
-
-
-TASKS = {
-    "age": TaskConfig(
-        training_plan_module="tabular_regressor",
-        training_plan_class="TabularRegressorTrainingPlan",
-        target_column="nb:Age",
-        test_metric=MetricTypes.MEAN_SQUARE_ERROR,
-        with_target_mean=True,
-        secagg_clipping_range=100,
-    ),
-    "sex": TaskConfig(
-        training_plan_module="tabular_classifier",
-        training_plan_class="TabularClassifierTrainingPlan",
-        target_column="nb:Sex",
-        test_metric=MetricTypes.ACCURACY,
-        extra_model_args={"n_classes": 2},
-    ),
-}
 
 
 def _get_parser() -> argparse.ArgumentParser:
@@ -239,139 +147,6 @@ def _get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _filter_feature_col(col: str) -> bool:
-    if col.startswith("nb:"):
-        return True
-    elif col.endswith("_thickness"):
-        # return False
-        return not (
-            col
-            in [
-                # exclude these
-                "lh_MeanThickness_thickness",
-                "rh_MeanThickness_thickness",
-                "rh_temporalpole_thickness",
-            ]
-        )
-    else:
-        return col in [
-            # include these
-            "EstimatedTotalIntraCranialVol",
-            "Left-Lateral-Ventricle",
-            "Left-Thalamus",
-            "Left-Caudate",
-            "Left-Putamen",
-            "Left-Pallidum",
-            "Left-Hippocampus",
-            "Left-Amygdala",
-            "Left-Accumbens-area",
-            "Right-Lateral-Ventricle",
-            "Right-Thalamus",
-            "Right-Caudate",
-            "Right-Putamen",
-            "Right-Pallidum",
-            "Right-Hippocampus",
-            "Right-Amygdala",
-            "Right-Accumbens-area",
-        ]
-
-
-def _serialize(obj: object) -> object:
-    if isinstance(obj, Enum):
-        return obj.name
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, (np.ndarray, np.generic)):
-        return obj.tolist()
-    if isinstance(obj, set):
-        return sorted(obj)
-    raise TypeError(f"Type {type(obj)} not serializable")
-
-
-def _save_json(fpath: Path, data: dict) -> None:
-    fpath.write_text(
-        json.dumps(data, indent=4, allow_nan=False, default=_serialize) + "\n"
-    )
-
-
-class _ListHandler(logging.Handler):
-    """Keep the formatted log messages in memory."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.messages: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(self.format(record))
-
-
-class _StripAnsiFormatter(logging.Formatter):
-    """Remove the terminal formatting codes."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        return ANSI_ESCAPE.sub("", super().format(record))
-
-
-def _get_node_log_level(record: logging.LogRecord) -> int | None:
-    """Get the original level of a node log message forwarded to the researcher."""
-    if record.funcName != "print_node_log_message":
-        return None
-    level_name = ANSI_ESCAPE.sub("", record.getMessage().split("\n", 1)[0]).strip()
-    level = logging.getLevelName(level_name)
-    return level if isinstance(level, int) else None
-
-
-def _filter_log_file_record(record: logging.LogRecord) -> bool:
-    """Keep all script messages but only the Fed-BioMed warnings and errors."""
-    if record.name == fbm_logger.name or record.name.startswith(f"{fbm_logger.name}."):
-        level = _get_node_log_level(record) or record.levelno
-        # security audit events are excluded from Fed-BioMed's console handler too
-        return level >= logging.WARNING and not getattr(record, "is_security", False)
-    return True
-
-
-@contextmanager
-def _log_to_file(fpath_log: Path) -> Generator[None, None, None]:
-    """Write the script messages and Fed-BioMed warnings/errors to a file."""
-    fpath_log.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(fpath_log, mode="w", encoding="utf-8")
-    handler.setFormatter(_StripAnsiFormatter(LOG_FORMAT_FILE))
-    handler.addFilter(_filter_log_file_record)
-    for logger_ in (logger, fbm_logger):
-        logger_.addHandler(handler)
-    try:
-        yield
-    finally:
-        for logger_ in (logger, fbm_logger):
-            logger_.removeHandler(handler)
-        handler.close()
-
-
-@contextmanager
-def _print_logger_messages_at_exit() -> Generator[None, None, None]:
-    """Print the script messages."""
-    handler = _ListHandler()
-    handler.setFormatter(logging.Formatter(LOG_FORMAT_SUMMARY))
-    logger.addHandler(handler)
-    try:
-        yield
-    finally:
-        logger.removeHandler(handler)
-        print("\n".join(handler.messages))
-
-
-def _load_training_plan_class(module_name: str, class_name: str) -> type:
-    spec = importlib.util.spec_from_file_location(
-        f"training_plans.{module_name}",
-        DPATH_TRAINING_PLANS / f"{module_name}.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    # registered so that Fed-BioMed can get the source code to send to nodes
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return getattr(module, class_name)
-
-
 def _get_node_data(task: str) -> dict[str, dict]:
     """Get the dataset metadata of each node that has data for a task."""
     fds = Experiment(tags=[COMMON_TAG, task]).training_data()
@@ -395,7 +170,7 @@ def _get_feature_stats(
         excluded_columns["not in the datasets of all nodes"] = missing_columns
     stats_columns: list[str] = []
     for column in sorted(common_columns):
-        if column == target_column or _filter_feature_col(column):
+        if column == target_column or filter_feature_col(column):
             stats_columns.append(column)
         else:
             excluded_columns["not in feature column list"].append(column)
@@ -616,7 +391,7 @@ def _run_task(
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
     exp.set_training_plan_class(
-        _load_training_plan_class(
+        load_training_plan_class(
             config.training_plan_module, config.training_plan_class
         )
     )
@@ -737,7 +512,7 @@ def run_experiments(
             " Use --overwrite to overwrite them"
         )
 
-    with _print_logger_messages_at_exit():
+    with print_logger_messages_at_exit():
         for task, held_out_nodes in runs.items():
             fpath_results = path_helper.get_fpath_out(
                 task=task, prefix=PREFIX_RESULTS, extension=".json"
@@ -747,7 +522,7 @@ def run_experiments(
             )
             json_data = {"settings": {"runtime_args": settings}, "folds": {}}
             fpath_results.parent.mkdir(parents=True, exist_ok=True)
-            with _log_to_file(fpath_log):
+            with log_to_file(fpath_log):
                 for held_out_node in held_out_nodes:
                     if held_out_node is None:
                         # use all nodes for training
@@ -790,7 +565,7 @@ def run_experiments(
                         secagg=secagg,
                     ):
                         json_data["folds"][fold_key] = fold
-                        _save_json(fpath_results, json_data)
+                        save_json(fpath_results, json_data)
                     logger.info(f"Saved settings and results to {fpath_results}")
             logger.info(f"Saved log to {fpath_log}")
 

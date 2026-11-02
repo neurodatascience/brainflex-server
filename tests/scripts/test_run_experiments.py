@@ -1,10 +1,7 @@
-import dataclasses
-import importlib.util
 import json
 import logging
 import sys
-from collections.abc import Generator
-from enum import Enum
+from collections.abc import Callable, Generator
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
@@ -13,10 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from fedbiomed.common.training_args import TrainingArgs
-from fedbiomed.common.training_plans import BaseTrainingPlan
 from pytest_mock import MockerFixture
 
-FPATH_SCRIPT = Path(__file__).parents[2] / "scripts" / "run_experiments.py"
 GLOBAL_STATS = {
     "mean": {
         "nb:Age": np.float64(30.0),
@@ -50,21 +45,8 @@ NODE_DATA = {
 
 
 @pytest.fixture
-def module(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> ModuleType:
-    # importing fedbiomed.researcher creates a component directory
-    monkeypatch.setenv(
-        "FBM_RESEARCHER_COMPONENT_ROOT",
-        str(tmp_path_factory.getbasetemp() / "fbm-researcher"),
-    )
-    # copy so that modules imported by the script are not kept
-    monkeypatch.setattr(sys, "modules", dict(sys.modules))
-    spec = importlib.util.spec_from_file_location("run_experiments", FPATH_SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+def module(load_script: Callable[[str], ModuleType]) -> ModuleType:
+    return load_script("run_experiments")
 
 
 @pytest.fixture
@@ -151,69 +133,6 @@ def fpath_csv(tmp_path: Path) -> Path:
         }
     ).to_csv(fpath, index=False)
     return fpath
-
-
-class TestLoadTrainingPlanClass:
-    @pytest.mark.parametrize("task", ["age", "sex"])
-    def test_source(self, module: ModuleType, task: str):
-        config = module.TASKS[task]
-        plan_cls = module._load_training_plan_class(
-            config.training_plan_module, config.training_plan_class
-        )
-        assert issubclass(plan_cls, BaseTrainingPlan)
-        assert f"class {config.training_plan_class}" in plan_cls().source()
-
-
-@pytest.fixture
-def path_helper(module: ModuleType, tmp_path: Path) -> object:
-    return module.PathHelper(
-        output_dir=tmp_path,
-        date_tag="2026_01_01",
-        n_rounds=10,
-        batch_size=32,
-        n_updates=50,
-        learning_rate=0.001,
-        test_ratio=0.2,
-        aggregator="scaffold",
-        fedprox_mu=2.0,
-        alpha=0.1,
-        secagg=True,
-        cv=True,
-    )
-
-
-class TestPathHelper:
-    def test_get_fpath_out(self, path_helper: object, tmp_path: Path):
-        assert path_helper.get_fpath_out("age", "results") == (
-            tmp_path
-            / "2026_01_01"
-            / "age"
-            / (
-                "results-scaffold-10rounds-50updates-32-0.001lr-0.2test-0.1alpha"
-                "-secagg-cv.json"
-            )
-        )
-
-    def test_no_secagg_no_cv(self, path_helper: object):
-        path_helper = dataclasses.replace(path_helper, secagg=False, cv=False)
-        fpath = path_helper.get_fpath_out("age", "results")
-        assert fpath.stem.endswith("-0.1alpha-no_secagg-no_cv")
-
-    def test_fedprox(self, path_helper: object):
-        path_helper = dataclasses.replace(path_helper, aggregator="fedprox")
-        fpath = path_helper.get_fpath_out("age", "results")
-        assert fpath.name.startswith("results-fedprox_2.0mu-")
-
-    def test_extension(self, path_helper: object, tmp_path: Path):
-        fpath = path_helper.get_fpath_out("sex", "model", ".pkl")
-        assert fpath.parent == tmp_path / "2026_01_01" / "sex"
-        assert fpath.suffix == ".pkl"
-
-    def test_held_out_node(self, path_helper: object):
-        fpath = path_helper.get_fpath_out(
-            "age", "model", ".pkl", held_out_node="NODE_1"
-        )
-        assert fpath.name.endswith("-0.1alpha-secagg-cv-heldout_NODE_1.pkl")
 
 
 class TestGetNodeData:
@@ -322,35 +241,6 @@ class TestSetupHeldOutSecagg:
         assert secagg_arguments == secagg.train_arguments.return_value
 
 
-class TestFilterFeatureCol:
-    @pytest.mark.parametrize(
-        "col",
-        [
-            "nb:Age",
-            "nb:Sex",
-            "EstimatedTotalIntraCranialVol",
-            "Left-Hippocampus",
-            "Right-Accumbens-area",
-        ],
-    )
-    def test_included(self, module: ModuleType, col: str):
-        assert module._filter_feature_col(col)
-
-    @pytest.mark.parametrize(
-        "col",
-        [
-            "Left-WM-hypointensities",
-            "non-WM-hypointensities",
-            "CSF",
-            "5th-Ventricle",
-            "lhSurfaceHoles",
-            "lh_insula",
-        ],
-    )
-    def test_excluded(self, module: ModuleType, col: str):
-        assert not module._filter_feature_col(col)
-
-
 class TestGetFeatureStats:
     def test_target_dropped(self, module: ModuleType, analytics: MagicMock):
         columns, mean, std, excluded_columns, target_mean = module._get_feature_stats(
@@ -449,7 +339,7 @@ class TestBuildModelArgs:
             task, columns, mean, std, 0.1, target_mean
         )
 
-        plan = module._load_training_plan_class(
+        plan = module.load_training_plan_class(
             config.training_plan_module, config.training_plan_class
         )()
         plan.post_init(model_args, TrainingArgs({}, only_required=False))
@@ -498,25 +388,6 @@ class TestGetAggOptimizer:
         assert module._get_agg_optimizer(aggregator) is None
 
 
-class TestSerialize:
-    @pytest.mark.parametrize(
-        "obj,expected",
-        [
-            (Enum("Color", "RED").RED, "RED"),
-            (Path("a/b"), "a/b"),
-            (np.array([1.0, 2.0]), [1.0, 2.0]),
-            (np.float64(1.5), 1.5),
-            ({"b", "a"}, ["a", "b"]),
-        ],
-    )
-    def test_serialize(self, module: ModuleType, obj: object, expected: object):
-        assert module._serialize(obj) == expected
-
-    def test_not_serializable(self, module: ModuleType):
-        with pytest.raises(TypeError, match="not serializable"):
-            module._serialize(object())
-
-
 class TestMoveTensorboardLogs:
     def test_move(
         self, module: ModuleType, dpath_fbm_tensorboard: Path, tmp_path: Path
@@ -545,93 +416,12 @@ class TestMoveTensorboardLogs:
         ]
 
 
-class TestLogToFile:
-    def test_log_to_file(self, module: ModuleType, tmp_path: Path):
-        fpath_log = tmp_path / "logs" / "logs.log"
-        fbm_logger = logging.getLogger("fedbiomed")
-        with module._log_to_file(fpath_log):
-            module.logger.info("script info")
-            module.logger.warning("script warning")
-            fbm_logger.info("fbm info")
-            fbm_logger.warning("fbm warning")
-            fbm_logger.error("fbm security", extra={"is_security": True})
-        lines = fpath_log.read_text().splitlines()
-        assert len(lines) == 3
-        assert lines[0].endswith("brainflex INFO     - script info")
-        assert lines[1].endswith("brainflex WARNING  - script warning")
-        assert lines[2].endswith("fedbiomed WARNING  - fbm warning")
-
-    @pytest.mark.parametrize(
-        ("node_level", "kept"), [("WARNING", True), ("ERROR", True), ("INFO", False)]
-    )
-    def test_node_log_message(
-        self, module: ModuleType, tmp_path: Path, node_level: str, kept: bool
-    ):
-        fpath_log = tmp_path / "logs.log"
-
-        # same name and message format as in Fed-BioMed's Requests class
-        def print_node_log_message() -> None:
-            logging.getLogger("fedbiomed").info(
-                f"\033[1m{node_level}\033[0m\n"
-                "\t\t\t\t\t\033[1m NODE\033[0m NODE_1\n"
-                "\t\t\t\t\t\033[1m MESSAGE:\033[0m node message\033[0m\n"
-            )
-
-        with module._log_to_file(fpath_log):
-            print_node_log_message()
-        text = fpath_log.read_text()
-        assert ("node message" in text) is kept
-        if kept:
-            assert f"fedbiomed INFO     - {node_level}\n" in text
-            assert "\033" not in text
-
-    def test_info_not_from_node(self, module: ModuleType, tmp_path: Path):
-        # the first line is only parsed for messages forwarded from the nodes
-        fpath_log = tmp_path / "logs.log"
-        with module._log_to_file(fpath_log):
-            logging.getLogger("fedbiomed").info("WARNING\nnot from a node")
-        assert fpath_log.read_text() == ""
-
-    def test_handler_removed_on_error(self, module: ModuleType, tmp_path: Path):
-        fbm_logger = logging.getLogger("fedbiomed")
-        handlers_before = (list(module.logger.handlers), list(fbm_logger.handlers))
-        with pytest.raises(RuntimeError), module._log_to_file(tmp_path / "logs.log"):
-            raise RuntimeError
-        assert (list(module.logger.handlers), list(fbm_logger.handlers)) == (
-            handlers_before
-        )
-
-
-class TestPrintLoggerMessagesAtExit:
-    def test_print_logger_messages_at_exit(
-        self, module: ModuleType, capsys: pytest.CaptureFixture
-    ):
-        with module._print_logger_messages_at_exit():
-            module.logger.info("[age] first")
-            logging.getLogger("fedbiomed").warning("not printed")
-            assert capsys.readouterr().out == ""
-            module.logger.warning("[age] second")
-        assert capsys.readouterr().out == (
-            "INFO     - [age] first\nWARNING  - [age] second\n"
-        )
-        assert not any(
-            isinstance(handler, module._ListHandler)
-            for handler in module.logger.handlers
-        )
-
-    def test_printed_on_error(self, module: ModuleType, capsys: pytest.CaptureFixture):
-        with pytest.raises(RuntimeError), module._print_logger_messages_at_exit():
-            module.logger.info("[age] before error")
-            raise RuntimeError
-        assert capsys.readouterr().out == "INFO     - [age] before error\n"
-
-
 class TestRunTask:
     def test_run_task(
         self, module: ModuleType, mock_experiment: MagicMock, tmp_path: Path
     ):
         fpath_model = tmp_path / "age" / "model.pkl"
-        with module._log_to_file(tmp_path / "logs.log"):
+        with module.log_to_file(tmp_path / "logs.log"):
             folds = list(
                 module._run_task(
                     "age",
@@ -679,7 +469,9 @@ class TestRunTask:
         # before training and after each round
         assert len(folds) == 4
         assert {fold_key for fold_key, _ in folds} == {"NODE_1__NODE_2__NODE_3"}
-        fold = json.loads(json.dumps(folds[-1][1], default=module._serialize))
+        fold = json.loads(
+            json.dumps(folds[-1][1], default=sys.modules["_io_utils"].serialize)
+        )
         assert fold["settings"]["excluded_columns"] == {}
         model_args = fold["settings"]["model_args"]
         assert model_args["target_column"] == "nb:Age"
@@ -792,7 +584,7 @@ class TestRunTask:
         task: str,
         n_warnings: int,
     ):
-        with module._log_to_file(tmp_path / "logs.log"):
+        with module.log_to_file(tmp_path / "logs.log"):
             list(
                 module._run_task(
                     task,
@@ -874,7 +666,7 @@ class TestRunTask:
         assert fold["settings"]["held_out_node"] == node_data_held_out
         assert "node_metrics" in fold["results"]
         assert not any("data leakage" in r.getMessage() for r in caplog.records)
-        assert "===== AGE: held_out=NODE_3 =====" in caplog.messages
+        assert "===== AGE: held_out_node=NODE_3 =====" in caplog.messages
 
 
 def _read_results(dpath_task: Path) -> tuple[Path, dict]:
@@ -943,7 +735,7 @@ class TestMain:
         assert fpath_results.name.startswith("results-scaffold-2rounds-")
         assert kwargs["fpath_model"].name.startswith("model-scaffold-2rounds-")
         assert kwargs["fpath_model"].suffix == ".pkl"
-        # created by _log_to_file even though _run_task is mocked
+        # created by log_to_file even though _run_task is mocked
         fpath_log = dpath_date / "age" / fpath_results.name.replace("results-", "logs-")
         assert fpath_log.with_suffix(".log").exists()
         assert kwargs["dpath_tensorboard"].parent == dpath_date / "age"

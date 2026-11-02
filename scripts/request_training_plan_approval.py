@@ -5,15 +5,13 @@
 import argparse
 import sys
 
+from _tasks import COMMON_TAG, TASKS, load_training_plan_class
 from fedbiomed.common.constants import TrainingPlanApprovalStatus
 from fedbiomed.researcher.federated_workflows import Experiment
 from fedbiomed.researcher.federated_workflows.jobs import (
     TrainingPlanApproveJob,
     TrainingPlanCheckJob,
 )
-
-# importable because the script's directory is the first entry of sys.path
-from run_experiments import COMMON_TAG, TASKS, _load_training_plan_class
 
 # Fed-BioMed-defined status of a training plan that a node doesn't know
 TRAINING_PLAN_NOT_REGISTERED = "Not Registered"
@@ -43,7 +41,7 @@ def _request_approval(task: str) -> dict[str, str]:
     nodes = fds.node_ids() if fds is not None else []
     if not nodes:
         raise ValueError(f"No node has a dataset for {task}")
-    training_plan = _load_training_plan_class(
+    training_plan = load_training_plan_class(
         config.training_plan_module, config.training_plan_class
     )()
 

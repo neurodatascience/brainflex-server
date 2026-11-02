@@ -1,6 +1,4 @@
-import importlib.util
-import sys
-from pathlib import Path
+from collections.abc import Callable
 from types import ModuleType
 from unittest.mock import MagicMock
 
@@ -9,32 +7,12 @@ from fedbiomed.common.constants import TrainingPlanApprovalStatus
 from fedbiomed.common.training_plans import BaseTrainingPlan
 from pytest_mock import MockerFixture
 
-FPATH_SCRIPT = (
-    Path(__file__).parents[2] / "scripts" / "request_training_plan_approval.py"
-)
 NODES = ["NODE_1", "NODE_2", "NODE_3", "NODE_4"]
 
 
 @pytest.fixture
-def module(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> ModuleType:
-    # importing fedbiomed.researcher creates a component directory
-    monkeypatch.setenv(
-        "FBM_RESEARCHER_COMPONENT_ROOT",
-        str(tmp_path_factory.getbasetemp() / "fbm-researcher"),
-    )
-    # copy so that modules imported by the script are not kept
-    monkeypatch.setattr(sys, "modules", dict(sys.modules))
-    # as when the script is run
-    monkeypatch.syspath_prepend(str(FPATH_SCRIPT.parent))
-    spec = importlib.util.spec_from_file_location(
-        "request_training_plan_approval", FPATH_SCRIPT
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+def module(load_script: Callable[[str], ModuleType]) -> ModuleType:
+    return load_script("request_training_plan_approval")
 
 
 @pytest.fixture
