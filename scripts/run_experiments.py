@@ -65,7 +65,7 @@ def _get_parser() -> argparse.ArgumentParser:
         dest="tasks",
         action="append",
         choices=list(TASKS),
-        help="Task to run. Can be repeated.",
+        help=f"Task to run. Can be repeated. Default: {DEFAULT_TASKS}",
     )
     parser.add_argument(
         "--n-rounds",
@@ -241,7 +241,7 @@ def _get_agg_optimizer(aggregator: str) -> Optimizer | None:
 
 
 def _move_tensorboard_logs(exp: Experiment, dpath_tensorboard: Path) -> None:
-    """Move the per-node logs out of the Fed-BioMed experiment directory."""
+    """Move the Tensorboard logs out of the Fed-BioMed experiment directory."""
     # flush the event files before moving them
     exp.monitor().close_writer()
     dpath_tensorboard.mkdir(parents=True, exist_ok=True)
@@ -300,7 +300,7 @@ def _evaluate_held_out(
         secagg_arguments=secagg_arguments,
         do_training=False,
     ).execute()
-    # the metrics are sent separately, so a failed request would go unnoticed
+    # raise explicit errors, otherwise failed requests are silent
     for node in node_data_held_out:
         if node not in replies:
             raise RuntimeError(f"Held-out node {node} did not reply")
@@ -458,7 +458,8 @@ def run_experiments(
     output_dir = output_dir.resolve()
     settings = locals().copy()
 
-    # held-out nodes for each task, with None for no held-out node
+    # keys: task
+    # values: held-out node (None if not doing CV)
     runs: dict[str, list[str | None]] = {}
     node_data: dict[str, dict[str, dict]] = {}
     for task in tasks:

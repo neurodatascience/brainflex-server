@@ -86,7 +86,7 @@ class TabularClassifierTrainingPlan(FedSGDClassifier):
             "BALANCED_ACCURACY": balanced_accuracy_score(target, prediction),
             "AUROC": roc_auc_score(target, self.model().decision_function(data)),
         }
-        # NaN cannot be saved in the results JSON
+        # omit metric(s) with NaN value since they cannot be saved in the results JSON
         return {
             name: metrics[name]
             for name in self.model_args().get("metrics", self.DEFAULT_METRICS)
