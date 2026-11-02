@@ -153,7 +153,7 @@ def _get_node_data(task: str) -> dict[str, dict]:
     return fds.data() if fds is not None else {}
 
 
-def _get_feature_stats(
+def _get_column_stats(
     analytics: FederatedAnalytics, node_data: dict[str, dict], target_column: str
 ) -> tuple[list[str], list[float], list[float], dict[str, list[str]], float]:
     """Get the feature/excluded columns, some stats, and the target variable's mean."""
@@ -383,7 +383,7 @@ def _run_task(
             )
 
     # the training plan needs the feature stats to be instantiated
-    columns, mean, std, excluded_columns, target_mean = _get_feature_stats(
+    columns, mean, std, excluded_columns, target_mean = _get_column_stats(
         exp.analytics, exp.training_data().data(), config.target_column
     )
     for reason, cols in excluded_columns.items():

@@ -241,9 +241,9 @@ class TestSetupHeldOutSecagg:
         assert secagg_arguments == secagg.train_arguments.return_value
 
 
-class TestGetFeatureStats:
+class TestGetColumnStats:
     def test_target_dropped(self, module: ModuleType, analytics: MagicMock):
-        columns, mean, std, excluded_columns, target_mean = module._get_feature_stats(
+        columns, mean, std, excluded_columns, target_mean = module._get_column_stats(
             analytics, NODE_DATA, "nb:Age"
         )
         assert columns == ["Left-Hippocampus", "Left-Thalamus", "nb:Sex"]
@@ -278,7 +278,7 @@ class TestGetFeatureStats:
         }
         # only in the dataset of one node
         node_data["NODE_1"]["dtypes"]["Left-Amygdala"] = "Float64"
-        columns, mean, std, excluded_columns, _ = module._get_feature_stats(
+        columns, mean, std, excluded_columns, _ = module._get_column_stats(
             analytics, node_data, "nb:Age"
         )
         assert columns == ["Left-Hippocampus", "Left-Thalamus", "nb:Sex"]
@@ -297,11 +297,11 @@ class TestGetFeatureStats:
         }
 
     def test_json_serializable(self, module: ModuleType, analytics: MagicMock):
-        json.dumps(module._get_feature_stats(analytics, NODE_DATA, "nb:Sex"))
+        json.dumps(module._get_column_stats(analytics, NODE_DATA, "nb:Sex"))
 
     def test_no_nodes(self, module: ModuleType, analytics: MagicMock):
         with pytest.raises(ValueError, match="No node has a dataset"):
-            module._get_feature_stats(analytics, {}, "nb:Age")
+            module._get_column_stats(analytics, {}, "nb:Age")
         analytics.fetch_stats.assert_not_called()
 
     def test_target_not_in_all_nodes(self, module: ModuleType, analytics: MagicMock):
@@ -310,7 +310,7 @@ class TestGetFeatureStats:
             "NODE_2": {"dtypes": {"nb:Sex": "Int64"}},
         }
         with pytest.raises(ValueError, match="not in the datasets of all nodes"):
-            module._get_feature_stats(analytics, node_data, "nb:Age")
+            module._get_column_stats(analytics, node_data, "nb:Age")
         analytics.fetch_stats.assert_not_called()
 
 
@@ -332,7 +332,7 @@ class TestBuildModelArgs:
         expected_x: list[list[float]],
     ):
         config = module.TASKS[task]
-        columns, mean, std, _, target_mean = module._get_feature_stats(
+        columns, mean, std, _, target_mean = module._get_column_stats(
             analytics, NODE_DATA, target_column
         )
         model_args = module._build_model_args(
