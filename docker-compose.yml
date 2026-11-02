@@ -19,7 +19,6 @@ services:
     pull_policy: build
     cap_add:
       - net_admin # needed to handle wireguard interface
-      - sys_module # needed to remove wireguard kernel module
     devices:
       - /dev/net/tun # needed to handle wireguard interface
     sysctls:
@@ -48,7 +47,6 @@ services:
     pull_policy: build
     cap_add:
       - net_admin # needed to handle wireguard interface
-      - sys_module # needed to remove wireguard kernel module
     devices:
       - /dev/net/tun # needed to handle wireguard interface
     volumes:
