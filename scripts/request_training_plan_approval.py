@@ -5,7 +5,7 @@
 import argparse
 import sys
 
-from _tasks import COMMON_TAG, TASKS, load_training_plan_class
+from _tasks import COMMON_TAG, TASKS
 from fedbiomed.common.constants import TrainingPlanApprovalStatus
 from fedbiomed.researcher.federated_workflows import Experiment
 from fedbiomed.researcher.federated_workflows.jobs import (
@@ -41,9 +41,7 @@ def _request_approval(task: str) -> dict[str, str]:
     nodes = fds.node_ids() if fds is not None else []
     if not nodes:
         raise ValueError(f"No node has a dataset for {task}")
-    training_plan = load_training_plan_class(
-        config.training_plan_module, config.training_plan_class
-    )()
+    training_plan = config.training_plan_class()
 
     replies = TrainingPlanCheckJob(
         researcher_id=exp.researcher_id,
@@ -75,7 +73,7 @@ def _request_approval(task: str) -> dict[str, str]:
             requests=exp.requests,
             nodes=nodes_not_registered,
             training_plan=training_plan,
-            description=f"{COMMON_TAG} {task}: {config.training_plan_class}",
+            description=f"{COMMON_TAG} {task}: {config.training_plan_class.__name__}",
         ).execute()
         for node in nodes_not_registered:
             not_approved[node] = STATUS_SENT

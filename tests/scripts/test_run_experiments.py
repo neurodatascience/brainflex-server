@@ -339,9 +339,7 @@ class TestBuildModelArgs:
             task, columns, mean, std, 0.1, target_mean
         )
 
-        plan = module.load_training_plan_class(
-            config.training_plan_module, config.training_plan_class
-        )()
+        plan = config.training_plan_class()
         plan.post_init(model_args, TrainingArgs({}, only_required=False))
         data_manager = plan.training_data()
         data_manager.load(tp_type=plan.type())
@@ -361,6 +359,17 @@ class TestBuildModelArgs:
     def test_target_mean(self, module: ModuleType):
         model_args = module._build_model_args("age", ["a"], [0.0], [1.0], 0.1, 30.0)
         assert model_args["target_mean"] == 30.0
+
+    @pytest.mark.parametrize(
+        "task,expected_metrics",
+        [
+            ("age", ["MEAN_SQUARE_ERROR", "MEAN_ABSOLUTE_ERROR", "R2"]),
+            ("sex", ["ACCURACY", "BALANCED_ACCURACY", "AUROC"]),
+        ],
+    )
+    def test_metrics(self, module: ModuleType, task: str, expected_metrics: list):
+        model_args = module._build_model_args(task, ["a"], [0.0], [1.0], 0.1, 30.0)
+        assert model_args["metrics"] == expected_metrics
 
 
 class TestBuildOptimizerArgs:
@@ -484,7 +493,8 @@ class TestRunTask:
         ]
         exp.set_model_args.assert_called_once_with(model_args)
         training_args = fold["settings"]["training_args"]
-        assert training_args["test_metric"] == "MEAN_SQUARE_ERROR"
+        # the metrics are computed by the training plan testing_step
+        assert "test_metric" not in training_args
         # JSON object keys are strings
         assert fold["results"] == json.loads(
             json.dumps(

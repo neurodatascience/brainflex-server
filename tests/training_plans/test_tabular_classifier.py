@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from fedbiomed.common.dataset import Dataset
+from fedbiomed.common.training_args import TrainingArgs
 from fedbiomed.common.training_plans import BaseTrainingPlan
 
 
@@ -106,3 +107,79 @@ class TestTabularClassifierTrainingPlan:
         plan.set_data_loaders(None, test_data_loader)
         assert plan.training_data_loader is None
         assert plan.testing_data_loader is test_data_loader
+
+    @pytest.mark.parametrize("use_source", [False, True])
+    def test_testing_step(
+        self,
+        plan_cls: type[BaseTrainingPlan],
+        model_args: dict,
+        from_source: Callable[[BaseTrainingPlan], type[BaseTrainingPlan]],
+        use_source: bool,
+    ):
+        plan = _fitted_plan(
+            plan_cls,
+            model_args | {"metrics": list(plan_cls.METRICS)},
+            from_source if use_source else None,
+        )
+        # decision scores: [-2, -1, 1, 2], predictions: [0, 0, 1, 1]
+        data = np.array([[-2.0, 5.0], [-1.0, 5.0], [1.0, 5.0], [2.0, 5.0]])
+        target = np.array([[0], [1], [1], [1]])
+        metrics = plan.testing_step(data, target)
+        assert metrics.keys() == {"ACCURACY", "BALANCED_ACCURACY", "AUROC"}
+        np.testing.assert_allclose(metrics["ACCURACY"], 0.75)
+        # (1 + 2 / 3) / 2
+        np.testing.assert_allclose(metrics["BALANCED_ACCURACY"], 5 / 6)
+        np.testing.assert_allclose(metrics["AUROC"], 1.0)
+
+    @pytest.mark.filterwarnings("ignore:A single label was found")
+    @pytest.mark.filterwarnings("ignore:Only one class is present")
+    def test_testing_step_single_class(
+        self, plan_cls: type[BaseTrainingPlan], model_args: dict
+    ):
+        plan = _fitted_plan(plan_cls, model_args | {"metrics": list(plan_cls.METRICS)})
+        data = np.array([[1.0, 5.0], [2.0, 5.0]])
+        metrics = plan.testing_step(data, np.array([[1], [1]]))
+        assert metrics == {"ACCURACY": 1.0, "BALANCED_ACCURACY": 1.0}
+
+    def test_testing_step_default(
+        self, plan_cls: type[BaseTrainingPlan], model_args: dict
+    ):
+        plan = _fitted_plan(plan_cls, model_args)
+        # predictions: [0, 0, 1]
+        data = np.array([[-2.0, 5.0], [-1.0, 5.0], [1.0, 5.0]])
+        target = np.array([[0], [1], [1]])
+        metrics = plan.testing_step(data, target)
+        assert metrics.keys() == {"ACCURACY"}
+        np.testing.assert_allclose(metrics["ACCURACY"], 2 / 3)
+
+    def test_testing_step_metrics_arg(
+        self, plan_cls: type[BaseTrainingPlan], model_args: dict
+    ):
+        plan = _fitted_plan(plan_cls, model_args | {"metrics": ["AUROC"]})
+        data = np.array([[-1.0, 5.0], [1.0, 5.0]])
+        assert plan.testing_step(data, np.array([[0], [1]])) == {"AUROC": 1.0}
+
+    def test_unknown_metric(self, plan_cls: type[BaseTrainingPlan], model_args: dict):
+        with pytest.raises(ValueError, match="Unknown metrics"):
+            plan_cls().post_init(
+                model_args | {"metrics": ["AUROC", "F1"]},
+                TrainingArgs({}, only_required=False),
+            )
+
+
+def _fitted_plan(
+    plan_cls: type[BaseTrainingPlan],
+    model_args: dict,
+    from_source: Callable[[BaseTrainingPlan], type[BaseTrainingPlan]] | None = None,
+) -> BaseTrainingPlan:
+    """Set up a training plan with the decision function x[0]."""
+    plan = plan_cls()
+    if from_source is not None:
+        plan = from_source(plan)()
+    plan.post_init(model_args, TrainingArgs({}, only_required=False))
+    plan.set_model_params(
+        {"coef_": np.array([[1.0, 0.0]]), "intercept_": np.array([0.0])}
+    )
+    # set by Fed-BioMed before testing
+    plan.model().classes_ = np.array([0, 1])
+    return plan

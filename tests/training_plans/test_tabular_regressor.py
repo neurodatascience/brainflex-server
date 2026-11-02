@@ -124,3 +124,63 @@ class TestTabularRegressorTrainingPlan:
         plan.set_data_loaders(None, test_data_loader)
         assert plan.training_data_loader is None
         assert plan.testing_data_loader is test_data_loader
+
+    @pytest.mark.parametrize("use_source", [False, True])
+    def test_testing_step(
+        self,
+        plan_cls: type[BaseTrainingPlan],
+        model_args: dict,
+        from_source: Callable[[BaseTrainingPlan], type[BaseTrainingPlan]],
+        use_source: bool,
+    ):
+        plan = plan_cls()
+        if use_source:
+            plan = from_source(plan)()
+        plan.post_init(
+            model_args | {"metrics": list(plan_cls.METRICS)},
+            TrainingArgs({}, only_required=False),
+        )
+        plan.set_model_params(
+            {"coef_": np.array([1.0, 0.0]), "intercept_": np.array([0.0])}
+        )
+        # predictions: [1, 2, 3, 4]
+        data = np.array([[1.0, 5.0], [2.0, 5.0], [3.0, 5.0], [4.0, 5.0]])
+        target = np.array([[1.0], [2.0], [4.0], [5.0]])
+        metrics = plan.testing_step(data, target)
+        assert metrics.keys() == {"MEAN_SQUARE_ERROR", "MEAN_ABSOLUTE_ERROR", "R2"}
+        np.testing.assert_allclose(metrics["MEAN_SQUARE_ERROR"], 0.5)
+        np.testing.assert_allclose(metrics["MEAN_ABSOLUTE_ERROR"], 0.5)
+        # 1 - 2 / 10
+        np.testing.assert_allclose(metrics["R2"], 0.8)
+
+    def test_testing_step_metrics_arg(
+        self, plan_cls: type[BaseTrainingPlan], model_args: dict
+    ):
+        plan = plan_cls()
+        plan.post_init(
+            model_args | {"metrics": ["MEAN_ABSOLUTE_ERROR"]},
+            TrainingArgs({}, only_required=False),
+        )
+        plan.set_model_params(
+            {"coef_": np.array([1.0, 0.0]), "intercept_": np.array([0.0])}
+        )
+        metrics = plan.testing_step(np.array([[1.0, 5.0]]), np.array([[3.0]]))
+        assert metrics == {"MEAN_ABSOLUTE_ERROR": 2.0}
+
+    def test_unknown_metric(self, plan_cls: type[BaseTrainingPlan], model_args: dict):
+        with pytest.raises(ValueError, match="Unknown metrics"):
+            plan_cls().post_init(
+                model_args | {"metrics": ["R2", "RMSE"]},
+                TrainingArgs({}, only_required=False),
+            )
+
+    def test_testing_step_default(
+        self, plan_cls: type[BaseTrainingPlan], model_args: dict
+    ):
+        plan = plan_cls()
+        plan.post_init(model_args, TrainingArgs({}, only_required=False))
+        plan.set_model_params(
+            {"coef_": np.array([1.0, 0.0]), "intercept_": np.array([0.0])}
+        )
+        metrics = plan.testing_step(np.array([[1.0, 5.0]]), np.array([[3.0]]))
+        assert metrics == {"MEAN_SQUARE_ERROR": 4.0}

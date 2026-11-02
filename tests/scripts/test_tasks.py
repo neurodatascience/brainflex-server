@@ -13,12 +13,9 @@ def module(load_script: Callable[[str], ModuleType]) -> ModuleType:
 class TestLoadTrainingPlanClass:
     @pytest.mark.parametrize("task", ["age", "sex"])
     def test_source(self, module: ModuleType, task: str):
-        config = module.TASKS[task]
-        plan_cls = module.load_training_plan_class(
-            config.training_plan_module, config.training_plan_class
-        )
+        plan_cls = module.TASKS[task].training_plan_class
         assert issubclass(plan_cls, BaseTrainingPlan)
-        assert f"class {config.training_plan_class}" in plan_cls().source()
+        assert f"class {plan_cls.__name__}" in plan_cls().source()
 
 
 class TestFilterFeatureCol:

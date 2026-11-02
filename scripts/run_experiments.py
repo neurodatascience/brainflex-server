@@ -21,7 +21,7 @@ from _io_utils import (
     save_json,
 )
 from _log_utils import log_to_file, logger, print_logger_messages_at_exit
-from _tasks import COMMON_TAG, TASKS, filter_feature_col, load_training_plan_class
+from _tasks import COMMON_TAG, TASKS, filter_feature_col
 from declearn.optimizer.modules import ScaffoldServerModule
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_args import TrainingArgs
@@ -215,6 +215,8 @@ def _build_model_args(
         "feature_std": std,
         "target_column": config.target_column,
         "alpha": alpha,
+        # all the metrics supported by the training plan
+        "metrics": list(config.training_plan_class.METRICS),
         **config.extra_model_args,
     }
     if config.with_target_mean:
@@ -347,7 +349,6 @@ def _run_task(
             "loader_args": {"batch_size": batch_size},
             "num_updates": n_updates,
             "test_ratio": test_ratio,
-            "test_metric": config.test_metric,
             "test_on_global_updates": True,
             "test_on_local_updates": True,
             "optimizer_args": _build_optimizer_args(
@@ -390,11 +391,7 @@ def _run_task(
     logger.info(f"Using {len(columns)} features")
     model_args = _build_model_args(task, columns, mean, std, alpha, target_mean)
     exp.set_model_args(model_args)
-    exp.set_training_plan_class(
-        load_training_plan_class(
-            config.training_plan_module, config.training_plan_class
-        )
-    )
+    exp.set_training_plan_class(config.training_plan_class)
 
     # saved before training so that they are available even if training fails
     fold = {
