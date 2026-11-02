@@ -13,7 +13,7 @@ The server runs with Docker Compose as three containers:
 ### Requirements
 
 - Docker with the Compose plugin (`docker compose`)
-- Inbound UDP access to port 51820, for the nodes to reach the VPN server
+- Inbound UDP access to port 51820 (or `VPN_SERVER_PORT` in `.env`), for the nodes to reach the VPN server
 
 ### Setup
 
