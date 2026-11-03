@@ -29,10 +29,10 @@ The server runs with Docker Compose as three containers:
    cp vpnserver_config/config.env.sample vpnserver_config/config.env
    ```
 
-3. Build and start the VPN server:
+3. Start the VPN server:
 
    ```bash
-   docker compose up -d --build vpn-server
+   docker compose up -d vpn-server
    ```
 
 4. Create the researcher peer and copy its configuration to the researcher VPN client:
@@ -45,7 +45,7 @@ The server runs with Docker Compose as three containers:
 5. Start the researcher:
 
    ```bash
-   docker compose up -d --build
+   docker compose up -d
    ```
 
 6. Register the public key of the researcher on the VPN server:
