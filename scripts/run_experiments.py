@@ -481,10 +481,10 @@ def run_experiments(
     runs: dict[str, list[str | None]] = {}
     node_data: dict[str, dict[str, dict]] = {}
     for task in tasks:
+        node_data[task] = _get_node_data(task)
         if not cv:
             runs[task] = [None]
             continue
-        node_data[task] = _get_node_data(task)
         # secure aggregation needs at least 2 training nodes
         min_n_nodes = 3 if secagg else 2
         if len(node_data[task]) < min_n_nodes:
@@ -537,7 +537,14 @@ def run_experiments(
             fpath_log = path_helper.get_fpath_out(
                 task=task, prefix=PREFIX_LOGS, extension=".log"
             )
-            json_data = {"settings": {"runtime_args": settings}, "folds": {}}
+            json_data = {
+                "settings": {"runtime_args": settings},
+                "node_names": {
+                    node: node_data[task][node]["name"]
+                    for node in sorted(node_data[task])
+                },
+                "folds": {},
+            }
             fpath_results.parent.mkdir(parents=True, exist_ok=True)
             with log_to_file(fpath_log):
                 for held_out_node in held_out_nodes:

@@ -725,6 +725,10 @@ def _write_results(
 
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _mock_get_node_data(self, mock_get_node_data: MagicMock) -> None:
+        """Avoid searching for node datasets."""
+
     def test_tasks_in_order(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
     ):
@@ -933,6 +937,9 @@ class TestMain:
             fpath_results, json_data = _read_results(dpath_date / task)
             assert fpath_results.name.endswith("-secagg-cv.json")
             assert json_data["settings"]["runtime_args"]["cv"] is True
+            assert json_data["node_names"] == {
+                node: f"name_{node}" for node in NODE_DATA
+            }
             assert list(json_data["folds"]) == [
                 "NODE_2__NODE_3",
                 "NODE_1__NODE_3",
@@ -951,10 +958,14 @@ class TestMain:
         tmp_path: Path,
     ):
         module.main([str(tmp_path), "--task", "age", "--no-cv"])
-        mock_get_node_data.assert_not_called()
+        mock_get_node_data.assert_called_once_with("age")
         kwargs = mock_run_task.call_args.kwargs
         assert kwargs["training_nodes"] is None
         assert kwargs["node_data_held_out"] is None
+        _, json_data = _read_results(
+            tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
+        )
+        assert json_data["node_names"] == {node: f"name_{node}" for node in NODE_DATA}
 
     @pytest.mark.parametrize(
         ("secagg", "n_nodes", "match"),
