@@ -519,7 +519,7 @@ def run_experiments(
         )
         if fpath.exists() and any(
             "results" in fold
-            for fold in json.loads(fpath.read_text()).get("folds", {}).values()
+            for fold in json.loads(fpath.read_text()).get("results", {}).values()
         ):
             fpaths_results_existing.append(fpath)
 
@@ -538,12 +538,12 @@ def run_experiments(
                 task=task, prefix=PREFIX_LOGS, extension=".log"
             )
             json_data = {
-                "settings": {"runtime_args": settings},
+                "settings": settings,
                 "node_names": {
                     node: node_data[task][node]["name"]
                     for node in sorted(node_data[task])
                 },
-                "folds": {},
+                "results": {},
             }
             fpath_results.parent.mkdir(parents=True, exist_ok=True)
             with log_to_file(fpath_log):
@@ -589,7 +589,7 @@ def run_experiments(
                         secagg=secagg,
                         random_seed=random_seed,
                     ):
-                        json_data["folds"][fold_key] = fold
+                        json_data["results"][fold_key] = fold
                         save_json(fpath_results, json_data)
                     logger.info(f"Saved settings and results to {fpath_results}")
             logger.info(f"Saved log to {fpath_log}")
