@@ -409,7 +409,7 @@ def _run_task(
     fold = {
         "settings": {
             "training_nodes": training_nodes,
-            "held_out_node": node_data_held_out,
+            "held_out_node": held_out_node,
             "excluded_columns": excluded_columns,
             "model_args": exp.model_args(),
             "training_args": exp.training_args(),

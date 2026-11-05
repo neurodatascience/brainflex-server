@@ -678,7 +678,7 @@ class TestRunTask:
         fold_key, fold = folds[-1]
         assert fold_key == "NODE_1__NODE_2"
         assert fold["settings"]["training_nodes"] == ["NODE_1", "NODE_2"]
-        assert fold["settings"]["held_out_node"] == node_data_held_out
+        assert fold["settings"]["held_out_node"] == "NODE_3"
         assert "node_metrics" in fold["results"]
         assert not any("data leakage" in r.getMessage() for r in caplog.records)
         assert "===== AGE: held_out_node=NODE_3 =====" in caplog.messages
