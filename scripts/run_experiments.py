@@ -44,6 +44,7 @@ DEFAULT_ALPHA = 0.1
 DEFAULT_TENSORBOARD = True
 DEFAULT_SECAGG = True
 DEFAULT_CV = True
+DEFAULT_RANDOM_SEED = 3791
 DEFAULT_DATE_TAG = date.today().strftime("%Y_%m_%d")
 
 
@@ -137,6 +138,15 @@ def _get_parser() -> argparse.ArgumentParser:
         help=(
             "Leave-one-node-out cross-validation: train on all nodes but one and"
             f" evaluate on the held-out node. Default: {DEFAULT_CV}."
+        ),
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help=(
+            "Random seed for the node data splits, batch shuffling and SGD."
+            f" Incremented at each round. Default: {DEFAULT_RANDOM_SEED}."
         ),
     )
     parser.add_argument(
@@ -326,6 +336,7 @@ def _run_task(
     training_nodes: list[str] | None = None,
     node_data_held_out: dict[str, dict] | None = None,
     secagg: bool = True,
+    random_seed: int = DEFAULT_RANDOM_SEED,
 ) -> Generator[tuple[str, dict], None, None]:
     """Train a model for a task and save it in a task-specific output directory.
 
@@ -356,6 +367,7 @@ def _run_task(
             ),
             # resample the local train/validation split at each round
             "shuffle_testing_dataset": is_cv,
+            "random_seed": random_seed,
         },
         agg_optimizer=_get_agg_optimizer(aggregator),
         round_limit=n_rounds,
@@ -413,6 +425,11 @@ def _run_task(
 
     for round_ in range(1, n_rounds + 1):
         logger.info(f"Round {round_}/{n_rounds}")
+        # nodes reseed at the start of every round, so offset the seed to get a
+        # different (but deterministic) data split and batch order at each round
+        exp.set_training_args(
+            {**exp.training_args(), "random_seed": random_seed + round_}
+        )
         if is_cv:
             _evaluate_held_out(exp, node_data_held_out, held_out_secagg_arguments)
         exp.run_once()
@@ -453,6 +470,7 @@ def run_experiments(
     tensorboard: bool = True,
     secagg: bool = True,
     cv: bool = True,
+    random_seed: int = DEFAULT_RANDOM_SEED,
 ) -> None:
     """Train and save a global model for each task."""
     output_dir = output_dir.resolve()
@@ -490,6 +508,7 @@ def run_experiments(
         alpha=alpha,
         secagg=secagg,
         cv=cv,
+        random_seed=random_seed,
     )
 
     # error out if one of the result files already exists
@@ -561,6 +580,7 @@ def run_experiments(
                         training_nodes=training_nodes,
                         node_data_held_out=node_data_held_out,
                         secagg=secagg,
+                        random_seed=random_seed,
                     ):
                         json_data["folds"][fold_key] = fold
                         save_json(fpath_results, json_data)
@@ -587,6 +607,7 @@ def main(argv: list[str] | None = None) -> None:
             tensorboard=args.tensorboard,
             secagg=args.secagg,
             cv=args.cv,
+            random_seed=args.random_seed,
         )
     except FileExistsError as e:
         sys.exit(f"Error: {e}")

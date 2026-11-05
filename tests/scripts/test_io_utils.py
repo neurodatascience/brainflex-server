@@ -28,6 +28,7 @@ def path_helper(module: ModuleType, tmp_path: Path) -> object:
         alpha=0.1,
         secagg=True,
         cv=True,
+        random_seed=3791,
     )
 
 
@@ -39,14 +40,14 @@ class TestPathHelper:
             / "age"
             / (
                 "results-scaffold-10rounds-50updates-32-0.001lr-0.2test-0.1alpha"
-                "-secagg-cv.json"
+                "-3791seed-secagg-cv.json"
             )
         )
 
     def test_no_secagg_no_cv(self, path_helper: object):
         path_helper = dataclasses.replace(path_helper, secagg=False, cv=False)
         fpath = path_helper.get_fpath_out("age", "results")
-        assert fpath.stem.endswith("-0.1alpha-no_secagg-no_cv")
+        assert fpath.stem.endswith("-0.1alpha-3791seed-no_secagg-no_cv")
 
     def test_fedprox(self, path_helper: object):
         path_helper = dataclasses.replace(path_helper, aggregator="fedprox")
@@ -62,7 +63,7 @@ class TestPathHelper:
         fpath = path_helper.get_fpath_out(
             "age", "model", ".pkl", held_out_node="NODE_1"
         )
-        assert fpath.name.endswith("-0.1alpha-secagg-cv-heldout_NODE_1.pkl")
+        assert fpath.name.endswith("-0.1alpha-3791seed-secagg-cv-heldout_NODE_1.pkl")
 
 
 class TestSerialize:

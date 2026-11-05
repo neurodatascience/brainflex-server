@@ -464,6 +464,11 @@ class TestRunTask:
         exp = mock_experiment.return_value
         assert exp.run_once.call_count == 3
         assert exp.save_training_replies.call_count == 3
+        assert training_args["random_seed"] == module.DEFAULT_RANDOM_SEED
+        # different seed at each round
+        assert [
+            call.args[0]["random_seed"] for call in exp.set_training_args.call_args_list
+        ] == [module.DEFAULT_RANDOM_SEED + round_ for round_ in (1, 2, 3)]
         exp.training_plan.return_value.export_model.assert_called_once_with(
             str(fpath_model)
         )
@@ -713,6 +718,7 @@ def _write_results(
         alpha=module.DEFAULT_ALPHA,
         secagg=module.DEFAULT_SECAGG,
         cv=cv,
+        random_seed=module.DEFAULT_RANDOM_SEED,
     ).get_fpath_out(task, module.PREFIX_RESULTS)
     fpath.parent.mkdir(parents=True)
     fpath.write_text(json.dumps(data))
@@ -799,6 +805,25 @@ class TestMain:
         module.main([str(tmp_path), "--task", "age", "--date-tag", "mytag", "--no-cv"])
         _, json_data = _read_results(tmp_path.resolve() / "mytag" / "age")
         assert json_data["settings"]["runtime_args"]["date_tag"] == "mytag"
+
+    def test_random_seed(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        module.main([str(tmp_path), "--task", "age", "--random-seed", "7", "--no-cv"])
+        kwargs = mock_run_task.call_args.kwargs
+        assert kwargs["random_seed"] == 7
+        assert "-7seed-" in kwargs["fpath_model"].name
+        fpath_results, json_data = _read_results(
+            tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
+        )
+        assert "-7seed-" in fpath_results.name
+        assert json_data["settings"]["runtime_args"]["random_seed"] == 7
+
+    def test_default_random_seed(
+        self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path
+    ):
+        module.main([str(tmp_path), "--task", "age", "--no-cv"])
+        assert mock_run_task.call_args.kwargs["random_seed"] == 3791
 
     def test_no_secagg(
         self, module: ModuleType, mock_run_task: MagicMock, tmp_path: Path

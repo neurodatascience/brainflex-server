@@ -27,6 +27,7 @@ class PathHelper:
     alpha: float
     secagg: bool
     cv: bool
+    random_seed: int
 
     def get_fpath_out(
         self,
@@ -49,6 +50,7 @@ class PathHelper:
                 f"{self.learning_rate}lr",
                 f"{self.test_ratio}test",
                 f"{self.alpha}alpha",
+                f"{self.random_seed}seed",
                 "secagg" if self.secagg else "no_secagg",
                 "cv" if self.cv else "no_cv",
             ]
