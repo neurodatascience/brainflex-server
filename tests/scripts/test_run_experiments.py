@@ -42,6 +42,7 @@ NODE_DATA = {
     }
     for node in ["NODE_1", "NODE_2", "NODE_3"]
 }
+NODE_NAMES = {node: f"node_name_{node}" for node in NODE_DATA}
 
 
 @pytest.fixture
@@ -118,7 +119,9 @@ def mock_setup_held_out_secagg(module: ModuleType, mocker: MockerFixture) -> Mag
 
 @pytest.fixture
 def mock_get_node_data(module: ModuleType, mocker: MockerFixture) -> MagicMock:
-    return mocker.patch.object(module, "_get_node_data", return_value=NODE_DATA)
+    return mocker.patch.object(
+        module, "_get_node_data", return_value=(NODE_DATA, NODE_NAMES)
+    )
 
 
 @pytest.fixture
@@ -135,16 +138,46 @@ def fpath_csv(tmp_path: Path) -> Path:
     return fpath
 
 
+def _mock_ping_replies(exp: MagicMock, node_names: dict[str, str]) -> None:
+    exp.researcher_id = "RESEARCHER_ID"
+    request = exp.requests.send.return_value.__enter__.return_value
+    request.replies.return_value = {
+        node: MagicMock(node_name=name) for node, name in node_names.items()
+    }
+
+
+class TestGetNodeNames:
+    def test_get_node_names(self, module: ModuleType):
+        exp = MagicMock()
+        _mock_ping_replies(exp, NODE_NAMES)
+        assert module._get_node_names(exp, list(NODE_DATA)) == NODE_NAMES
+        message, nodes = exp.requests.send.call_args.args
+        assert message.researcher_id == "RESEARCHER_ID"
+        assert nodes == list(NODE_DATA)
+
+    def test_missing_reply(self, module: ModuleType, caplog: pytest.LogCaptureFixture):
+        exp = MagicMock()
+        _mock_ping_replies(
+            exp, {node: NODE_NAMES[node] for node in ["NODE_1", "NODE_3"]}
+        )
+        with caplog.at_level(logging.WARNING):
+            node_names = module._get_node_names(exp, list(NODE_DATA))
+        assert node_names == {**NODE_NAMES, "NODE_2": None}
+        assert "Could not get the name of nodes: ['NODE_2']" in caplog.text
+
+
 class TestGetNodeData:
     def test_get_node_data(self, module: ModuleType, mock_experiment: MagicMock):
         exp = mock_experiment.return_value
         exp.training_data.return_value.data.return_value = NODE_DATA
-        assert module._get_node_data("age") == NODE_DATA
+        _mock_ping_replies(exp, NODE_NAMES)
+        assert module._get_node_data("age") == (NODE_DATA, NODE_NAMES)
         assert mock_experiment.call_args.kwargs["tags"] == ["brainflex", "age"]
 
     def test_no_nodes(self, module: ModuleType, mock_experiment: MagicMock):
         mock_experiment.return_value.training_data.return_value = None
-        assert module._get_node_data("age") == {}
+        assert module._get_node_data("age") == ({}, {})
+        mock_experiment.return_value.requests.send.assert_not_called()
 
 
 class TestEvaluateHeldOut:
@@ -937,9 +970,7 @@ class TestMain:
             fpath_results, json_data = _read_results(dpath_date / task)
             assert fpath_results.name.endswith("-secagg-cv.json")
             assert json_data["settings"]["cv"] is True
-            assert json_data["node_names"] == {
-                node: f"name_{node}" for node in NODE_DATA
-            }
+            assert json_data["node_names"] == NODE_NAMES
             assert list(json_data["results"]) == [
                 "NODE_2__NODE_3",
                 "NODE_1__NODE_3",
@@ -965,7 +996,7 @@ class TestMain:
         _, json_data = _read_results(
             tmp_path.resolve() / module.DEFAULT_DATE_TAG / "age"
         )
-        assert json_data["node_names"] == {node: f"name_{node}" for node in NODE_DATA}
+        assert json_data["node_names"] == NODE_NAMES
 
     @pytest.mark.parametrize(
         ("secagg", "n_nodes", "match"),
@@ -984,7 +1015,10 @@ class TestMain:
         n_nodes: int,
         match: str,
     ):
-        mock_get_node_data.return_value = dict(list(NODE_DATA.items())[:n_nodes])
+        mock_get_node_data.return_value = (
+            dict(list(NODE_DATA.items())[:n_nodes]),
+            NODE_NAMES,
+        )
         with pytest.raises(ValueError, match=match):
             module.run_experiments(tmp_path, ["age"], secagg=secagg)
         mock_run_task.assert_not_called()
@@ -996,7 +1030,10 @@ class TestMain:
         mock_get_node_data: MagicMock,
         tmp_path: Path,
     ):
-        mock_get_node_data.return_value = dict(list(NODE_DATA.items())[:2])
+        mock_get_node_data.return_value = (
+            dict(list(NODE_DATA.items())[:2]),
+            NODE_NAMES,
+        )
         module.run_experiments(tmp_path, ["age"], secagg=False)
         assert mock_run_task.call_count == 2
 

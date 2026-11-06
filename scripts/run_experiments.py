@@ -23,11 +23,13 @@ from _io_utils import (
 from _log_utils import log_to_file, logger, print_logger_messages_at_exit
 from _tasks import COMMON_TAG, TASKS, filter_feature_col
 from declearn.optimizer.modules import ScaffoldServerModule
+from fedbiomed.common.message import PingRequest
 from fedbiomed.common.optimizers.optimizer import Optimizer
 from fedbiomed.common.training_args import TrainingArgs
 from fedbiomed.researcher.datasets import FederatedDataset
 from fedbiomed.researcher.federated_workflows import Experiment, FederatedAnalytics
 from fedbiomed.researcher.federated_workflows.jobs import TrainingJob
+from fedbiomed.researcher.requests import DiscardOnTimeout
 from fedbiomed.researcher.secagg import SecureAggregation
 
 AGGREGATORS = ["fedavg", "fedprox", "scaffold"]
@@ -157,10 +159,28 @@ def _get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _get_node_data(task: str) -> dict[str, dict]:
-    """Get the dataset metadata of each node that has data for a task."""
-    fds = Experiment(tags=[COMMON_TAG, task]).training_data()
-    return fds.data() if fds is not None else {}
+def _get_node_names(exp: Experiment, nodes: list[str]) -> dict[str, str | None]:
+    """Get the name of each node."""
+    message = PingRequest(researcher_id=exp.researcher_id)
+    with exp.requests.send(message, nodes, policies=[DiscardOnTimeout(5)]) as request:
+        replies = request.replies()
+    node_names = {
+        node: replies[node].node_name if node in replies else None
+        for node in sorted(nodes)
+    }
+    if missing := [node for node, name in node_names.items() if name is None]:
+        logger.warning(f"Could not get the name of nodes: {missing}")
+    return node_names
+
+
+def _get_node_data(task: str) -> tuple[dict[str, dict], dict[str, str | None]]:
+    """Get the dataset metadata and the name of each node that has data for a task."""
+    exp = Experiment(tags=[COMMON_TAG, task])
+    fds = exp.training_data()
+    if fds is None:
+        return {}, {}
+    node_data = fds.data()
+    return node_data, _get_node_names(exp, list(node_data))
 
 
 def _get_column_stats(
@@ -480,8 +500,9 @@ def run_experiments(
     # values: held-out node (None if not doing CV)
     runs: dict[str, list[str | None]] = {}
     node_data: dict[str, dict[str, dict]] = {}
+    node_names: dict[str, dict[str, str | None]] = {}
     for task in tasks:
-        node_data[task] = _get_node_data(task)
+        node_data[task], node_names[task] = _get_node_data(task)
         if not cv:
             runs[task] = [None]
             continue
@@ -539,10 +560,7 @@ def run_experiments(
             )
             json_data = {
                 "settings": settings,
-                "node_names": {
-                    node: node_data[task][node]["name"]
-                    for node in sorted(node_data[task])
-                },
+                "node_names": node_names[task],
                 "results": {},
             }
             fpath_results.parent.mkdir(parents=True, exist_ok=True)
