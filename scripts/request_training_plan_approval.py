@@ -37,7 +37,7 @@ def _get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _request_approval(task: str, node_config: dict | None = None) -> dict[str, str]:
+def _request_approval(task: str) -> dict[str, str]:
     """Check the approval of a task's training plan by the nodes with data for it.
 
     Returns the status of each node that has not approved the training plan.
