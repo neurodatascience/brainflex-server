@@ -114,6 +114,14 @@ docker compose down
 
 To start from scratch, delete everything in `vpnserver_config/`, `researcher_vpn_config/` and `fbm-researcher/` except `.gitkeep` and `config.env.sample`.
 
+### Troubleshooting
+
+Run the script below to get the human-readable node name for every node that can connect to the researcher:
+
+```bash
+docker compose exec -u fedbiomed researcher python /brainflex-server/scripts/get_node_names.py
+```
+
 ## Development
 
 This project uses [uv](https://docs.astral.sh/uv/).
