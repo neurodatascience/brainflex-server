@@ -11,7 +11,7 @@ services:
   vpn-server:
     container_name: brainflex-vpn-server-${FBM_CONTAINER_INSTANCE_ID:-default}
     hostname: brainflex-vpn-server-${FBM_CONTAINER_INSTANCE_ID:-default}
-    image: ghcr.io/neurodatascience/brainflex-vpn-server:0.1.0@sha256:29e6463ae5696478913ff0c0973729c10af426f6507ecdb27f6c0be38038a1fd
+    image: ghcr.io/neurodatascience/brainflex-vpn-server:0.1.1@sha256:deb1ab2c842b6cd36afa7c2345928090b4172c453b50be30169b5c11957e5d84
     cap_add:
       - net_admin # needed to handle wireguard interface
     devices:
@@ -38,7 +38,7 @@ services:
   researcher-vpn:
     container_name: brainflex-researcher-vpn-${FBM_CONTAINER_INSTANCE_ID:-default}
     hostname: brainflex-researcher-${FBM_CONTAINER_INSTANCE_ID:-default}
-    image: ghcr.io/neurodatascience/brainflex-vpn-client:0.1.0@sha256:1c353258abde508771422e71384301aea88915b2f34bd2e236f3c8a9ab250de4
+    image: ghcr.io/neurodatascience/brainflex-vpn-client:0.1.1@sha256:e0696dda58501ca46954f4844842fd97e6b4476509fa0f835ad1f34107e34faf
     cap_add:
       - net_admin # needed to handle wireguard interface
     devices:
