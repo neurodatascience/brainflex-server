@@ -3,10 +3,12 @@
 """Request the approval of the training plans by the nodes."""
 
 import argparse
+import faulthandler
 import sys
 
 from _tasks import COMMON_TAG, TASKS
 from fedbiomed.common.constants import TrainingPlanApprovalStatus
+from fedbiomed.common.logger import logger
 from fedbiomed.researcher.federated_workflows import Experiment
 from fedbiomed.researcher.federated_workflows.jobs import (
     TrainingPlanApproveJob,
@@ -17,9 +19,14 @@ from fedbiomed.researcher.federated_workflows.jobs import (
 TRAINING_PLAN_NOT_REGISTERED = "Not Registered"
 STATUS_SENT = "sent for approval"
 
-
 def _get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--debug",
+        nargs="?",
+        const=-1,
+        help="Enable debug mode. Pass with an integer value n to exit after n seconds with a traceback.",
+    )
     parser.add_argument(
         "--task",
         dest="tasks",
@@ -30,7 +37,7 @@ def _get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _request_approval(task: str) -> dict[str, str]:
+def _request_approval(task: str, node_config: dict | None = None) -> dict[str, str]:
     """Check the approval of a task's training plan by the nodes with data for it.
 
     Returns the status of each node that has not approved the training plan.
@@ -82,6 +89,15 @@ def _request_approval(task: str) -> dict[str, str]:
 
 def main(argv: list[str] | None = None) -> None:
     args = _get_parser().parse_args(argv)
+    if args.debug:
+        logger.setLevel("DEBUG")
+        try:
+            debug_seconds = int(args.debug)
+        except TypeError:
+            pass
+        else:
+            if debug_seconds > 0:
+                faulthandler.dump_traceback_later(debug_seconds, exit=True)
     all_approved = True
     for task in args.tasks or list(TASKS):
         try:
